@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 #if CONFIG_FIXTURE_ADC_ENABLE
@@ -84,6 +85,9 @@ static const char *TAG = "ai_fixture";
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
+#define RUNTIME_NET_MAP_SLOT_COUNT 8
+#define RUNTIME_NET_LABEL_LEN      32
+#define RUNTIME_NET_NVS_NAMESPACE  "fixture_net"
 
 static char s_ip_addr[16] = "0.0.0.0";
 static int s_mux_channel = 0;
@@ -94,6 +98,18 @@ typedef struct {
     const char *label;
     int channel;
 } fixture_net_entry_t;
+
+typedef struct {
+    char label[RUNTIME_NET_LABEL_LEN];
+    int channel;
+    bool enabled;
+} fixture_runtime_net_entry_t;
+
+typedef struct {
+    const char *label;
+    int channel;
+    const char *source;
+} fixture_net_selection_t;
 
 typedef struct {
     const char *label;
@@ -113,6 +129,8 @@ static const fixture_net_entry_t s_net_map[] = {
     {CONFIG_FIXTURE_NET6_LABEL, CONFIG_FIXTURE_NET6_CHANNEL},
     {CONFIG_FIXTURE_NET7_LABEL, CONFIG_FIXTURE_NET7_CHANNEL},
 };
+
+static fixture_runtime_net_entry_t s_runtime_net_map[RUNTIME_NET_MAP_SLOT_COUNT];
 
 static const fixture_digital_input_entry_t s_digital_inputs[] = {
     {CONFIG_FIXTURE_DIN0_LABEL, CONFIG_FIXTURE_DIN0_GPIO, CONFIG_FIXTURE_DIN0_ACTIVE_LOW, CONFIG_FIXTURE_DIN0_PULLUP, CONFIG_FIXTURE_DIN0_PULLDOWN},
@@ -390,19 +408,65 @@ static bool net_label_is_enabled(const char *label)
     return label && label[0] != '\0';
 }
 
-static bool net_entry_is_selectable(const fixture_net_entry_t *entry)
+static bool net_selection_is_selectable(const fixture_net_selection_t *entry)
 {
-    return net_label_is_enabled(entry->label) &&
+    return entry &&
+           net_label_is_enabled(entry->label) &&
            entry->channel >= 0 &&
            entry->channel <= CONFIG_FIXTURE_MUX_MAX_CHANNEL &&
            mux_channel_can_be_selected(entry->channel);
 }
 
+static bool net_entry_is_selectable(const fixture_net_entry_t *entry)
+{
+    const fixture_net_selection_t selection = {
+        .label = entry->label,
+        .channel = entry->channel,
+        .source = "default",
+    };
+    return net_selection_is_selectable(&selection);
+}
+
+static bool runtime_net_entry_is_enabled(const fixture_runtime_net_entry_t *entry)
+{
+    return entry && entry->enabled && net_label_is_enabled(entry->label);
+}
+
+static bool runtime_net_label_shadows_default(const char *label)
+{
+    if (!net_label_is_enabled(label)) {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (runtime_net_entry_is_enabled(&s_runtime_net_map[i]) &&
+            strcmp(s_runtime_net_map[i].label, label) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool runtime_net_entry_is_selectable(const fixture_runtime_net_entry_t *entry)
+{
+    const fixture_net_selection_t selection = {
+        .label = entry->label,
+        .channel = entry->channel,
+        .source = "runtime",
+    };
+    return runtime_net_entry_is_enabled(entry) && net_selection_is_selectable(&selection);
+}
+
 static int count_enabled_net_entries(void)
 {
     int count = 0;
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (runtime_net_entry_is_enabled(&s_runtime_net_map[i])) {
+            count++;
+        }
+    }
     for (size_t i = 0; i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
-        if (net_label_is_enabled(s_net_map[i].label)) {
+        if (net_label_is_enabled(s_net_map[i].label) &&
+            !runtime_net_label_shadows_default(s_net_map[i].label)) {
             count++;
         }
     }
@@ -412,26 +476,190 @@ static int count_enabled_net_entries(void)
 static int count_invalid_net_entries(void)
 {
     int count = 0;
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (runtime_net_entry_is_enabled(&s_runtime_net_map[i]) &&
+            !runtime_net_entry_is_selectable(&s_runtime_net_map[i])) {
+            count++;
+        }
+    }
     for (size_t i = 0; i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
-        if (net_label_is_enabled(s_net_map[i].label) && !net_entry_is_selectable(&s_net_map[i])) {
+        if (net_label_is_enabled(s_net_map[i].label) &&
+            !runtime_net_label_shadows_default(s_net_map[i].label) &&
+            !net_entry_is_selectable(&s_net_map[i])) {
             count++;
         }
     }
     return count;
 }
 
-static const fixture_net_entry_t *find_net_entry(const char *label)
+static int count_runtime_net_entries(void)
 {
-    if (!net_label_is_enabled(label)) {
-        return NULL;
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (runtime_net_entry_is_enabled(&s_runtime_net_map[i])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static bool find_net_selection(const char *label, fixture_net_selection_t *selection)
+{
+    if (!net_label_is_enabled(label) || !selection) {
+        return false;
+    }
+
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (runtime_net_entry_is_enabled(&s_runtime_net_map[i]) &&
+            strcmp(s_runtime_net_map[i].label, label) == 0) {
+            selection->label = s_runtime_net_map[i].label;
+            selection->channel = s_runtime_net_map[i].channel;
+            selection->source = "runtime";
+            return true;
+        }
     }
 
     for (size_t i = 0; i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
         if (net_label_is_enabled(s_net_map[i].label) && strcmp(s_net_map[i].label, label) == 0) {
-            return &s_net_map[i];
+            selection->label = s_net_map[i].label;
+            selection->channel = s_net_map[i].channel;
+            selection->source = "default";
+            return true;
         }
     }
-    return NULL;
+    return false;
+}
+
+static void runtime_net_key(char *buf, size_t len, const char *prefix, size_t index)
+{
+    snprintf(buf, len, "%s%u", prefix, (unsigned int)index);
+}
+
+static int find_runtime_net_slot_by_label(const char *label)
+{
+    if (!net_label_is_enabled(label)) {
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (runtime_net_entry_is_enabled(&s_runtime_net_map[i]) &&
+            strcmp(s_runtime_net_map[i].label, label) == 0) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int find_runtime_net_free_slot(void)
+{
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (!runtime_net_entry_is_enabled(&s_runtime_net_map[i])) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void clear_runtime_net_slot(size_t index)
+{
+    if (index >= sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0])) {
+        return;
+    }
+    s_runtime_net_map[index].label[0] = '\0';
+    s_runtime_net_map[index].channel = 0;
+    s_runtime_net_map[index].enabled = false;
+}
+
+static esp_err_t erase_runtime_net_slot_from_nvs(size_t index)
+{
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(RUNTIME_NET_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    char key[12];
+    runtime_net_key(key, sizeof(key), "label", index);
+    esp_err_t label_ret = nvs_erase_key(handle, key);
+    runtime_net_key(key, sizeof(key), "chan", index);
+    esp_err_t channel_ret = nvs_erase_key(handle, key);
+    ret = nvs_commit(handle);
+    nvs_close(handle);
+    if (label_ret != ESP_OK && label_ret != ESP_ERR_NVS_NOT_FOUND) {
+        return label_ret;
+    }
+    if (channel_ret != ESP_OK && channel_ret != ESP_ERR_NVS_NOT_FOUND) {
+        return channel_ret;
+    }
+    return ret;
+}
+
+static esp_err_t save_runtime_net_slot_to_nvs(size_t index)
+{
+    if (index >= sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]) ||
+        !runtime_net_entry_is_enabled(&s_runtime_net_map[index])) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(RUNTIME_NET_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    char key[12];
+    runtime_net_key(key, sizeof(key), "label", index);
+    ret = nvs_set_str(handle, key, s_runtime_net_map[index].label);
+    if (ret == ESP_OK) {
+        runtime_net_key(key, sizeof(key), "chan", index);
+        ret = nvs_set_i32(handle, key, s_runtime_net_map[index].channel);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return ret;
+}
+
+static void load_runtime_net_map_from_nvs(void)
+{
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        clear_runtime_net_slot(i);
+    }
+
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(RUNTIME_NET_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to open runtime net map NVS: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        char key[12];
+        char label[RUNTIME_NET_LABEL_LEN] = {0};
+        size_t label_len = sizeof(label);
+        runtime_net_key(key, sizeof(key), "label", i);
+        ret = nvs_get_str(handle, key, label, &label_len);
+        if (ret == ESP_ERR_NVS_NOT_FOUND) {
+            continue;
+        }
+        if (ret != ESP_OK || !net_label_is_enabled(label)) {
+            ESP_LOGW(TAG, "Ignoring invalid runtime net label in slot %u", (unsigned int)i);
+            continue;
+        }
+        int32_t channel = 0;
+        runtime_net_key(key, sizeof(key), "chan", i);
+        ret = nvs_get_i32(handle, key, &channel);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Ignoring runtime net %s with missing channel", label);
+            continue;
+        }
+        snprintf(s_runtime_net_map[i].label, sizeof(s_runtime_net_map[i].label), "%s", label);
+        s_runtime_net_map[i].channel = channel;
+        s_runtime_net_map[i].enabled = true;
+    }
+    nvs_close(handle);
 }
 
 static bool digital_input_entry_is_enabled(const fixture_digital_input_entry_t *entry)
@@ -736,6 +964,7 @@ static void append_status_json(char *buf, size_t len)
              "\"reset_gpio\":%d,"
              "\"load_switch_gpio\":%d,"
              "\"mux_gpios\":[%d,%d,%d],"
+             "\"runtime_net_entry_count\":%d,"
              "\"digital_input_count\":%d,"
              "\"invalid_digital_input_count\":%d"
              "%s}",
@@ -750,6 +979,7 @@ static void append_status_json(char *buf, size_t len)
              CONFIG_FIXTURE_MUX_SEL0_GPIO,
              CONFIG_FIXTURE_MUX_SEL1_GPIO,
              CONFIG_FIXTURE_MUX_SEL2_GPIO,
+             count_runtime_net_entries(),
              count_enabled_digital_inputs(),
              count_invalid_digital_inputs(),
              adc_json);
@@ -759,24 +989,53 @@ static void append_net_map_json(char *buf, size_t len)
 {
     const int entry_count = count_enabled_net_entries();
     const int invalid_entry_count = count_invalid_net_entries();
+    int runtime_entry_count = 0;
     size_t offset = 0;
     bool first = true;
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (runtime_net_entry_is_enabled(&s_runtime_net_map[i])) {
+            runtime_entry_count++;
+        }
+    }
 
     json_appendf(buf,
                  len,
                  &offset,
                  "{\"ok\":%s,"
                  "\"entry_count\":%d,"
+                 "\"runtime_entry_count\":%d,"
                  "\"invalid_entry_count\":%d,"
                  "\"mux_max_channel\":%d,"
                  "\"entries\":[",
                  invalid_entry_count == 0 ? "true" : "false",
                  entry_count,
+                 runtime_entry_count,
                  invalid_entry_count,
                  CONFIG_FIXTURE_MUX_MAX_CHANNEL);
 
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (!runtime_net_entry_is_enabled(&s_runtime_net_map[i])) {
+            continue;
+        }
+
+        if (!first) {
+            json_appendf(buf, len, &offset, ",");
+        }
+        first = false;
+        json_appendf(buf, len, &offset, "{\"net\":");
+        json_append_escaped_string(buf, len, &offset, s_runtime_net_map[i].label);
+        json_appendf(buf,
+                     len,
+                     &offset,
+                     ",\"mux_channel\":%d,\"source\":\"runtime\",\"slot\":%u,\"selectable\":%s}",
+                     s_runtime_net_map[i].channel,
+                     (unsigned int)i,
+                     runtime_net_entry_is_selectable(&s_runtime_net_map[i]) ? "true" : "false");
+    }
+
     for (size_t i = 0; i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
-        if (!net_label_is_enabled(s_net_map[i].label)) {
+        if (!net_label_is_enabled(s_net_map[i].label) ||
+            runtime_net_label_shadows_default(s_net_map[i].label)) {
             continue;
         }
 
@@ -789,7 +1048,7 @@ static void append_net_map_json(char *buf, size_t len)
         json_appendf(buf,
                      len,
                      &offset,
-                     ",\"mux_channel\":%d,\"selectable\":%s}",
+                     ",\"mux_channel\":%d,\"source\":\"default\",\"selectable\":%s}",
                      s_net_map[i].channel,
                      net_entry_is_selectable(&s_net_map[i]) ? "true" : "false");
     }
@@ -880,6 +1139,7 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
     const bool mux_config_ok = mux_config_supports_max_channel();
     const bool mux_settle_ok = CONFIG_FIXTURE_MUX_SETTLE_MS <= CONFIG_FIXTURE_MAX_MUX_SETTLE_MS;
     const int net_map_entry_count = count_enabled_net_entries();
+    const int runtime_net_map_entry_count = count_runtime_net_entries();
     const int invalid_net_map_entries = count_invalid_net_entries();
     const int digital_input_count = count_enabled_digital_inputs();
     const int invalid_digital_inputs = count_invalid_digital_inputs();
@@ -924,6 +1184,7 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              "\"mux_config_ok\":%s,"
              "\"mux_gpio_ok\":[%s,%s,%s],"
              "\"net_map_entry_count\":%d,"
+             "\"runtime_net_map_entry_count\":%d,"
              "\"invalid_net_map_entry_count\":%d,"
              "\"net_map_ok\":%s,"
              "\"digital_input_count\":%d,"
@@ -969,6 +1230,7 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              output_gpio_config_is_ok(CONFIG_FIXTURE_MUX_SEL1_GPIO) ? "true" : "false",
              output_gpio_config_is_ok(CONFIG_FIXTURE_MUX_SEL2_GPIO) ? "true" : "false",
              net_map_entry_count,
+             runtime_net_map_entry_count,
              invalid_net_map_entries,
              invalid_net_map_entries == 0 ? "true" : "false",
              digital_input_count,
@@ -1049,8 +1311,8 @@ static esp_mcp_value_t select_net_callback(const esp_mcp_property_list_t *proper
         return json_value("{\"ok\":false,\"error\":\"missing_net\"}");
     }
 
-    const fixture_net_entry_t *entry = find_net_entry(net);
-    if (!entry) {
+    fixture_net_selection_t entry = {0};
+    if (!find_net_selection(net, &entry)) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"unknown_net\",\"net\":");
@@ -1059,43 +1321,184 @@ static esp_mcp_value_t select_net_callback(const esp_mcp_property_list_t *proper
         return json_value(payload);
     }
 
-    if (entry->channel < 0 || entry->channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
+    if (entry.channel < 0 || entry.channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      "{\"ok\":false,\"error\":\"net_channel_out_of_range\",\"net\":");
-        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry.label);
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      ",\"mux_channel\":%d,\"max_channel\":%d}",
-                     entry->channel,
+                     entry.channel,
                      CONFIG_FIXTURE_MUX_MAX_CHANNEL);
         return json_value(payload);
     }
 
-    if (!mux_channel_can_be_selected(entry->channel)) {
+    if (!mux_channel_can_be_selected(entry.channel)) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      "{\"ok\":false,\"error\":\"net_channel_not_representable\",\"net\":");
-        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
-        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry->channel);
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry.label);
+        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry.channel);
         return json_value(payload);
     }
 
-    set_mux_channel(entry->channel);
-    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
+    set_mux_channel(entry.channel);
+    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry.label);
 
     char payload[256];
     size_t offset = 0;
     json_appendf(payload, sizeof(payload), &offset, "{\"ok\":true,\"net\":");
-    json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
-    json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", s_mux_channel);
+    json_append_escaped_string(payload, sizeof(payload), &offset, entry.label);
+    json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d,\"source\":\"%s\"}", s_mux_channel, entry.source);
+    return json_value(payload);
+}
+
+static esp_mcp_value_t set_runtime_net_callback(const esp_mcp_property_list_t *properties)
+{
+    const char *net = esp_mcp_property_list_get_property_string(properties, "net");
+    if (!net_label_is_enabled(net)) {
+        return json_value("{\"ok\":false,\"error\":\"missing_net\"}");
+    }
+    if (strlen(net) >= RUNTIME_NET_LABEL_LEN) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"net_label_too_long\",\"max_length\":%d}",
+                 RUNTIME_NET_LABEL_LEN - 1);
+        return json_value(payload);
+    }
+
+    const int channel = esp_mcp_property_list_get_property_int(properties, "channel");
+    if (channel < 0 || channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"channel_out_of_range\",\"max_channel\":%d}",
+                 CONFIG_FIXTURE_MUX_MAX_CHANNEL);
+        return json_value(payload);
+    }
+    if (!mux_channel_can_be_selected(channel)) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"mux_channel_not_representable\",\"channel\":%d}",
+                 channel);
+        return json_value(payload);
+    }
+
+    int slot = find_runtime_net_slot_by_label(net);
+    if (slot < 0) {
+        slot = find_runtime_net_free_slot();
+    }
+    if (slot < 0) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"runtime_net_map_full\",\"max_entries\":%d}",
+                 RUNTIME_NET_MAP_SLOT_COUNT);
+        return json_value(payload);
+    }
+
+    snprintf(s_runtime_net_map[slot].label, sizeof(s_runtime_net_map[slot].label), "%s", net);
+    s_runtime_net_map[slot].channel = channel;
+    s_runtime_net_map[slot].enabled = true;
+
+    esp_err_t ret = save_runtime_net_slot_to_nvs((size_t)slot);
+    if (ret != ESP_OK) {
+        char payload[192];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"nvs_save_failed\",\"esp_err\":\"%s\"}",
+                 esp_err_to_name(ret));
+        return json_value(payload);
+    }
+
+    char payload[256];
+    size_t offset = 0;
+    json_appendf(payload, sizeof(payload), &offset, "{\"ok\":true,\"net\":");
+    json_append_escaped_string(payload, sizeof(payload), &offset, net);
+    json_appendf(payload,
+                 sizeof(payload),
+                 &offset,
+                 ",\"mux_channel\":%d,\"slot\":%d,\"persisted\":true}",
+                 channel,
+                 slot);
+    return json_value(payload);
+}
+
+static esp_mcp_value_t clear_runtime_net_callback(const esp_mcp_property_list_t *properties)
+{
+    const char *net = esp_mcp_property_list_get_property_string(properties, "net");
+    if (!net_label_is_enabled(net)) {
+        return json_value("{\"ok\":false,\"error\":\"missing_net\"}");
+    }
+
+    const int slot = find_runtime_net_slot_by_label(net);
+    if (slot < 0) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"runtime_net_not_found\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, net);
+        json_appendf(payload, sizeof(payload), &offset, "}");
+        return json_value(payload);
+    }
+
+    esp_err_t ret = erase_runtime_net_slot_from_nvs((size_t)slot);
+    clear_runtime_net_slot((size_t)slot);
+    if (ret != ESP_OK) {
+        char payload[192];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"nvs_erase_failed\",\"esp_err\":\"%s\"}",
+                 esp_err_to_name(ret));
+        return json_value(payload);
+    }
+
+    char payload[256];
+    size_t offset = 0;
+    json_appendf(payload, sizeof(payload), &offset, "{\"ok\":true,\"net\":");
+    json_append_escaped_string(payload, sizeof(payload), &offset, net);
+    json_appendf(payload, sizeof(payload), &offset, ",\"slot\":%d}", slot);
+    return json_value(payload);
+}
+
+static esp_mcp_value_t clear_runtime_net_map_callback(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    int cleared = 0;
+    esp_err_t first_error = ESP_OK;
+    for (size_t i = 0; i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (!runtime_net_entry_is_enabled(&s_runtime_net_map[i])) {
+            continue;
+        }
+        esp_err_t ret = erase_runtime_net_slot_from_nvs(i);
+        if (ret != ESP_OK && first_error == ESP_OK) {
+            first_error = ret;
+        }
+        clear_runtime_net_slot(i);
+        cleared++;
+    }
+
+    if (first_error != ESP_OK) {
+        char payload[192];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"nvs_erase_failed\",\"esp_err\":\"%s\",\"cleared_count\":%d}",
+                 esp_err_to_name(first_error),
+                 cleared);
+        return json_value(payload);
+    }
+
+    char payload[128];
+    snprintf(payload, sizeof(payload), "{\"ok\":true,\"cleared_count\":%d}", cleared);
     return json_value(payload);
 }
 
@@ -1196,7 +1599,7 @@ static esp_mcp_value_t scan_digital_inputs_callback(const esp_mcp_property_list_
         return json_value(payload);
     }
 
-    char payload[1536];
+    char payload[3072];
     size_t offset = 0;
     bool first = true;
     int scanned_count = 0;
@@ -1451,8 +1854,8 @@ static esp_mcp_value_t read_net_adc_raw_callback(const esp_mcp_property_list_t *
         return json_value("{\"ok\":false,\"error\":\"missing_net\"}");
     }
 
-    const fixture_net_entry_t *entry = find_net_entry(net);
-    if (!entry) {
+    fixture_net_selection_t entry = {0};
+    if (!find_net_selection(net, &entry)) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"unknown_net\",\"net\":");
@@ -1461,32 +1864,32 @@ static esp_mcp_value_t read_net_adc_raw_callback(const esp_mcp_property_list_t *
         return json_value(payload);
     }
 
-    if (entry->channel < 0 || entry->channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
+    if (entry.channel < 0 || entry.channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      "{\"ok\":false,\"error\":\"net_channel_out_of_range\",\"net\":");
-        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry.label);
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      ",\"mux_channel\":%d,\"max_channel\":%d}",
-                     entry->channel,
+                     entry.channel,
                      CONFIG_FIXTURE_MUX_MAX_CHANNEL);
         return json_value(payload);
     }
 
-    if (!mux_channel_can_be_selected(entry->channel)) {
+    if (!mux_channel_can_be_selected(entry.channel)) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      "{\"ok\":false,\"error\":\"net_channel_not_representable\",\"net\":");
-        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
-        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry->channel);
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry.label);
+        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry.channel);
         return json_value(payload);
     }
 
@@ -1503,8 +1906,8 @@ static esp_mcp_value_t read_net_adc_raw_callback(const esp_mcp_property_list_t *
         return json_value(payload);
     }
 
-    set_mux_channel(entry->channel);
-    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
+    set_mux_channel(entry.channel);
+    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry.label);
     if (settle_ms > 0) {
         vTaskDelay(pdMS_TO_TICKS(settle_ms));
     }
@@ -1522,11 +1925,12 @@ static esp_mcp_value_t read_net_adc_raw_callback(const esp_mcp_property_list_t *
     char payload[768];
     size_t offset = 0;
     json_appendf(payload, sizeof(payload), &offset, "{\"ok\":true,\"net\":");
-    json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+    json_append_escaped_string(payload, sizeof(payload), &offset, entry.label);
     json_appendf(payload,
                  sizeof(payload),
                  &offset,
                  ",\"mux_channel\":%d,"
+                 "\"source\":\"%s\","
                  "\"settle_ms\":%d,"
                  "\"adc_unit\":%d,"
                  "\"adc_channel\":%d,"
@@ -1538,6 +1942,7 @@ static esp_mcp_value_t read_net_adc_raw_callback(const esp_mcp_property_list_t *
                  "\"millivolts_valid\":%s,"
                  "\"scaled_millivolts_valid\":%s",
                  s_mux_channel,
+                 entry.source,
                  settle_ms,
                  CONFIG_FIXTURE_ADC_UNIT,
                  CONFIG_FIXTURE_ADC_CHANNEL,
@@ -1587,8 +1992,8 @@ static esp_mcp_value_t sample_net_adc_series_callback(const esp_mcp_property_lis
         return json_value("{\"ok\":false,\"error\":\"missing_net\"}");
     }
 
-    const fixture_net_entry_t *entry = find_net_entry(net);
-    if (!entry) {
+    fixture_net_selection_t entry = {0};
+    if (!find_net_selection(net, &entry)) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"unknown_net\",\"net\":");
@@ -1597,32 +2002,32 @@ static esp_mcp_value_t sample_net_adc_series_callback(const esp_mcp_property_lis
         return json_value(payload);
     }
 
-    if (entry->channel < 0 || entry->channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
+    if (entry.channel < 0 || entry.channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      "{\"ok\":false,\"error\":\"net_channel_out_of_range\",\"net\":");
-        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry.label);
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      ",\"mux_channel\":%d,\"max_channel\":%d}",
-                     entry->channel,
+                     entry.channel,
                      CONFIG_FIXTURE_MUX_MAX_CHANNEL);
         return json_value(payload);
     }
 
-    if (!mux_channel_can_be_selected(entry->channel)) {
+    if (!mux_channel_can_be_selected(entry.channel)) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload,
                      sizeof(payload),
                      &offset,
                      "{\"ok\":false,\"error\":\"net_channel_not_representable\",\"net\":");
-        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
-        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry->channel);
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry.label);
+        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry.channel);
         return json_value(payload);
     }
 
@@ -1679,8 +2084,8 @@ static esp_mcp_value_t sample_net_adc_series_callback(const esp_mcp_property_lis
         return json_value(payload);
     }
 
-    set_mux_channel(entry->channel);
-    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
+    set_mux_channel(entry.channel);
+    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry.label);
     if (settle_ms > 0) {
         vTaskDelay(pdMS_TO_TICKS(settle_ms));
     }
@@ -1696,11 +2101,12 @@ static esp_mcp_value_t sample_net_adc_series_callback(const esp_mcp_property_lis
     const int64_t start_ms = esp_timer_get_time() / 1000;
 
     json_ok = json_ok && json_appendf(payload, payload_len, &offset, "{\"ok\":true,\"net\":");
-    json_ok = json_ok && json_append_escaped_string(payload, payload_len, &offset, entry->label);
+    json_ok = json_ok && json_append_escaped_string(payload, payload_len, &offset, entry.label);
     json_ok = json_ok && json_appendf(payload,
                                       payload_len,
                                       &offset,
                                       ",\"mux_channel\":%d,"
+                                      "\"source\":\"%s\","
                                       "\"settle_ms\":%d,"
                                       "\"adc_unit\":%d,"
                                       "\"adc_channel\":%d,"
@@ -1710,6 +2116,7 @@ static esp_mcp_value_t sample_net_adc_series_callback(const esp_mcp_property_lis
                                       "\"max_total_ms\":%d,"
                                       "\"readings\":[",
                                       s_mux_channel,
+                                      entry.source,
                                       settle_ms,
                                       CONFIG_FIXTURE_ADC_UNIT,
                                       CONFIG_FIXTURE_ADC_CHANNEL,
@@ -1763,6 +2170,54 @@ static esp_mcp_value_t sample_net_adc_series_callback(const esp_mcp_property_lis
     esp_mcp_value_t value = json_value(payload);
     free(payload);
     return value;
+}
+
+static esp_err_t append_net_adc_scan_reading(char *payload,
+                                             size_t payload_len,
+                                             size_t *offset,
+                                             const fixture_net_selection_t *entry,
+                                             int settle_ms,
+                                             int samples,
+                                             int64_t start_ms,
+                                             bool *first,
+                                             int *scanned_count)
+{
+    if (!net_selection_is_selectable(entry)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    set_mux_channel(entry->channel);
+    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
+    if (settle_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(settle_ms));
+    }
+
+    adc_reading_t reading = {0};
+    esp_err_t ret = read_adc_average(samples, &reading);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    bool json_ok = true;
+    if (!*first) {
+        json_ok = json_ok && json_appendf(payload, payload_len, offset, ",");
+    }
+    *first = false;
+    (*scanned_count)++;
+    json_ok = json_ok && json_appendf(payload, payload_len, offset, "{\"net\":");
+    json_ok = json_ok && json_append_escaped_string(payload, payload_len, offset, entry->label);
+    json_ok = json_ok && json_appendf(payload,
+                                      payload_len,
+                                      offset,
+                                      ",\"mux_channel\":%d,"
+                                      "\"source\":\"%s\","
+                                      "\"t_ms\":%lld,",
+                                      entry->channel,
+                                      entry->source,
+                                      (long long)((esp_timer_get_time() / 1000) - start_ms));
+    json_ok = json_ok && append_adc_reading_json_fields(payload, payload_len, offset, &reading);
+    json_ok = json_ok && json_appendf(payload, payload_len, offset, "}");
+    return json_ok ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 static esp_mcp_value_t scan_net_adc_callback(const esp_mcp_property_list_t *properties)
@@ -1839,57 +2294,65 @@ static esp_mcp_value_t scan_net_adc_callback(const esp_mcp_property_list_t *prop
                                       CONFIG_FIXTURE_ADC_CHANNEL,
                                       samples);
 
-    for (size_t i = 0; json_ok && i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
-        const fixture_net_entry_t *entry = &s_net_map[i];
-        if (!net_label_is_enabled(entry->label)) {
+    for (size_t i = 0; json_ok && i < sizeof(s_runtime_net_map) / sizeof(s_runtime_net_map[0]); i++) {
+        if (!runtime_net_entry_is_enabled(&s_runtime_net_map[i])) {
             continue;
         }
-
-        if (!net_entry_is_selectable(entry)) {
-            free(payload);
-            char error_payload[192];
-            snprintf(error_payload,
-                     sizeof(error_payload),
-                     "{\"ok\":false,\"error\":\"net_entry_not_selectable\",\"index\":%u}",
-                     (unsigned int)i);
-            return json_value(error_payload);
-        }
-
-        set_mux_channel(entry->channel);
-        snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
-        if (settle_ms > 0) {
-            vTaskDelay(pdMS_TO_TICKS(settle_ms));
-        }
-
-        adc_reading_t reading = {0};
-        esp_err_t ret = read_adc_average(samples, &reading);
+        const fixture_net_selection_t entry = {
+            .label = s_runtime_net_map[i].label,
+            .channel = s_runtime_net_map[i].channel,
+            .source = "runtime",
+        };
+        esp_err_t ret = append_net_adc_scan_reading(payload,
+                                                    payload_len,
+                                                    &offset,
+                                                    &entry,
+                                                    settle_ms,
+                                                    samples,
+                                                    start_ms,
+                                                    &first,
+                                                    &scanned_count);
         if (ret != ESP_OK) {
             free(payload);
-            char error_payload[192];
+            char error_payload[224];
             snprintf(error_payload,
                      sizeof(error_payload),
-                     "{\"ok\":false,\"error\":\"adc_read_failed\",\"esp_err\":\"%s\",\"net_index\":%u}",
+                     "{\"ok\":false,\"error\":\"net_scan_failed\",\"esp_err\":\"%s\",\"source\":\"runtime\",\"slot\":%u}",
                      esp_err_to_name(ret),
                      (unsigned int)i);
             return json_value(error_payload);
         }
+    }
 
-        if (!first) {
-            json_ok = json_ok && json_appendf(payload, payload_len, &offset, ",");
+    for (size_t i = 0; json_ok && i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
+        if (!net_label_is_enabled(s_net_map[i].label) ||
+            runtime_net_label_shadows_default(s_net_map[i].label)) {
+            continue;
         }
-        first = false;
-        scanned_count++;
-        json_ok = json_ok && json_appendf(payload, payload_len, &offset, "{\"net\":");
-        json_ok = json_ok && json_append_escaped_string(payload, payload_len, &offset, entry->label);
-        json_ok = json_ok && json_appendf(payload,
-                                          payload_len,
-                                          &offset,
-                                          ",\"mux_channel\":%d,"
-                                          "\"t_ms\":%lld,",
-                                          entry->channel,
-                                          (long long)((esp_timer_get_time() / 1000) - start_ms));
-        json_ok = json_ok && append_adc_reading_json_fields(payload, payload_len, &offset, &reading);
-        json_ok = json_ok && json_appendf(payload, payload_len, &offset, "}");
+        const fixture_net_selection_t entry = {
+            .label = s_net_map[i].label,
+            .channel = s_net_map[i].channel,
+            .source = "default",
+        };
+        esp_err_t ret = append_net_adc_scan_reading(payload,
+                                                    payload_len,
+                                                    &offset,
+                                                    &entry,
+                                                    settle_ms,
+                                                    samples,
+                                                    start_ms,
+                                                    &first,
+                                                    &scanned_count);
+        if (ret != ESP_OK) {
+            free(payload);
+            char error_payload[224];
+            snprintf(error_payload,
+                     sizeof(error_payload),
+                     "{\"ok\":false,\"error\":\"net_scan_failed\",\"esp_err\":\"%s\",\"source\":\"default\",\"index\":%u}",
+                     esp_err_to_name(ret),
+                     (unsigned int)i);
+            return json_value(error_payload);
+        }
     }
 
     json_ok = json_ok && json_appendf(payload,
@@ -2288,6 +2751,42 @@ static void register_fixture_tools(esp_mcp_t *mcp)
         "{\"audience\":[\"assistant\"],\"priority\":0.7,\"risk\":\"medium\"}"));
     ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
 
+    tool = esp_mcp_tool_create("fixture.set_runtime_net",
+                               "Persistently map a board net/testpoint label to a fixture MUX channel.",
+                               set_runtime_net_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_string("net", CONFIG_FIXTURE_NET0_LABEL)));
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("channel", 0, 0, CONFIG_FIXTURE_MUX_MAX_CHANNEL)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.75,\"risk\":\"medium\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
+    tool = esp_mcp_tool_create("fixture.clear_runtime_net",
+                               "Remove one persisted runtime net/testpoint mapping by label.",
+                               clear_runtime_net_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_string("net", CONFIG_FIXTURE_NET0_LABEL)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.7,\"risk\":\"medium\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
+    tool = esp_mcp_tool_create("fixture.clear_runtime_net_map",
+                               "Remove all persisted runtime net/testpoint mappings.",
+                               clear_runtime_net_map_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.65,\"risk\":\"medium\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
     tool = esp_mcp_tool_create("fixture.reset_dut",
                                "Pulse the DUT reset line within the configured maximum duration.",
                                reset_dut_callback);
@@ -2506,6 +3005,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    load_runtime_net_map_from_nvs();
     init_fixture_io();
 #if CONFIG_FIXTURE_ADC_ENABLE
     init_adc();

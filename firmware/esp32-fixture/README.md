@@ -18,6 +18,9 @@ Default mode is SoftAP so the firmware can be used without a lab router:
 | `fixture.self_test` | Run non-destructive GPIO, ADC and heap sanity checks |
 | `fixture.set_mux_channel` | Select an allowlisted MUX channel |
 | `fixture.select_net` | Select a MUX channel by configured net/testpoint label |
+| `fixture.set_runtime_net` | Persistently map a board net/testpoint label to a MUX channel |
+| `fixture.clear_runtime_net` | Remove one persisted runtime net/testpoint mapping |
+| `fixture.clear_runtime_net_map` | Remove all persisted runtime net/testpoint mappings |
 | `fixture.reset_dut` | Pulse DUT reset within configured max duration |
 | `fixture.set_load_switch` | Enable/disable a fixture-controlled load switch |
 | `fixture.read_digital_input` | Read one configured digital input such as PGOOD, FAULT or IRQ |
@@ -131,6 +134,13 @@ signals such as `PGOOD`, `FAULT`, `IRQ` or `BOOT_MODE`. `fixture.self_test`
 fails closed if a digital input uses an invalid GPIO, reuses an output or ADC
 GPIO, duplicates another digital input GPIO or label, or enables pull-up and
 pull-down at the same time.
+
+Runtime net mappings let one flashed image adapt to different DUTs. Use
+`fixture.set_runtime_net` to persist a net/testpoint label in NVS. Runtime
+entries are listed first in `fixture://net-map` and override default Kconfig
+entries with the same label. Use `fixture.clear_runtime_net` or
+`fixture.clear_runtime_net_map` before switching fixtures if the previous board
+used different labels.
 
 When ADC calibration is available, ADC tools return both raw fields and
 millivolt fields:
@@ -259,6 +269,28 @@ curl -X POST http://192.168.4.1/mcp \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fixture.select_net","arguments":{"net":"TP0"}}}'
 ```
 
+Persist a runtime net/testpoint mapping:
+
+```bash
+curl -X POST http://192.168.4.1/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "MCP-Protocol-Version: 2024-11-05" \
+  -H "MCP-Session-Id: <session-id>" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fixture.set_runtime_net","arguments":{"net":"VIN","channel":0}}}'
+```
+
+Clear all runtime net/testpoint mappings:
+
+```bash
+curl -X POST http://192.168.4.1/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "MCP-Protocol-Version: 2024-11-05" \
+  -H "MCP-Session-Id: <session-id>" \
+  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"fixture.clear_runtime_net_map","arguments":{}}}'
+```
+
 Scan digital inputs:
 
 ```bash
@@ -267,7 +299,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fixture.scan_digital_inputs","arguments":{}}}'
+  -d '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"fixture.scan_digital_inputs","arguments":{}}}'
 ```
 
 Read one digital input:
@@ -278,7 +310,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"fixture.read_digital_input","arguments":{"label":"PGOOD"}}}'
+  -d '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"fixture.read_digital_input","arguments":{"label":"PGOOD"}}}'
 ```
 
 Read net/testpoint ADC:
@@ -289,7 +321,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"fixture.read_net_adc_raw","arguments":{"net":"TP0","samples":8,"settle_ms":10}}}'
+  -d '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"fixture.read_net_adc_raw","arguments":{"net":"TP0","samples":8,"settle_ms":10}}}'
 ```
 
 Scan all configured net/testpoint ADC values:
@@ -300,7 +332,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"fixture.scan_net_adc","arguments":{"samples":4,"settle_ms":10}}}'
+  -d '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"fixture.scan_net_adc","arguments":{"samples":4,"settle_ms":10}}}'
 ```
 
 Sample a short net/testpoint ADC series:
@@ -311,7 +343,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"fixture.sample_net_adc_series","arguments":{"net":"TP0","points":4,"samples_per_point":4,"interval_ms":20,"settle_ms":10}}}'
+  -d '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"fixture.sample_net_adc_series","arguments":{"net":"TP0","points":4,"samples_per_point":4,"interval_ms":20,"settle_ms":10}}}'
 ```
 
 Pulse reset:
@@ -322,7 +354,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"fixture.reset_dut","arguments":{"pulse_ms":100}}}'
+  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"fixture.reset_dut","arguments":{"pulse_ms":100}}}'
 ```
 
 Read status resource:
@@ -333,7 +365,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":11,"method":"resources/read","params":{"uri":"fixture://status"}}'
+  -d '{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{"uri":"fixture://status"}}'
 ```
 
 Read net map resource:
@@ -344,7 +376,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":12,"method":"resources/read","params":{"uri":"fixture://net-map"}}'
+  -d '{"jsonrpc":"2.0","id":14,"method":"resources/read","params":{"uri":"fixture://net-map"}}'
 ```
 
 Read digital input map resource:
@@ -355,7 +387,7 @@ curl -X POST http://192.168.4.1/mcp \
   -H "Accept: application/json" \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{"uri":"fixture://digital-inputs"}}'
+  -d '{"jsonrpc":"2.0","id":15,"method":"resources/read","params":{"uri":"fixture://digital-inputs"}}'
 ```
 
 ## Default Pin Map
