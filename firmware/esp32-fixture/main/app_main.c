@@ -43,6 +43,43 @@
 #include "esp_mcp_resource.h"
 #include "esp_mcp_tool.h"
 
+#ifndef CONFIG_FIXTURE_DIN0_ACTIVE_LOW
+#define CONFIG_FIXTURE_DIN0_ACTIVE_LOW 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN0_PULLUP
+#define CONFIG_FIXTURE_DIN0_PULLUP 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN0_PULLDOWN
+#define CONFIG_FIXTURE_DIN0_PULLDOWN 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN1_ACTIVE_LOW
+#define CONFIG_FIXTURE_DIN1_ACTIVE_LOW 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN1_PULLUP
+#define CONFIG_FIXTURE_DIN1_PULLUP 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN1_PULLDOWN
+#define CONFIG_FIXTURE_DIN1_PULLDOWN 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN2_ACTIVE_LOW
+#define CONFIG_FIXTURE_DIN2_ACTIVE_LOW 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN2_PULLUP
+#define CONFIG_FIXTURE_DIN2_PULLUP 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN2_PULLDOWN
+#define CONFIG_FIXTURE_DIN2_PULLDOWN 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN3_ACTIVE_LOW
+#define CONFIG_FIXTURE_DIN3_ACTIVE_LOW 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN3_PULLUP
+#define CONFIG_FIXTURE_DIN3_PULLUP 0
+#endif
+#ifndef CONFIG_FIXTURE_DIN3_PULLDOWN
+#define CONFIG_FIXTURE_DIN3_PULLDOWN 0
+#endif
+
 static const char *TAG = "ai_fixture";
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -58,6 +95,14 @@ typedef struct {
     int channel;
 } fixture_net_entry_t;
 
+typedef struct {
+    const char *label;
+    int gpio;
+    bool active_low;
+    bool pullup;
+    bool pulldown;
+} fixture_digital_input_entry_t;
+
 static const fixture_net_entry_t s_net_map[] = {
     {CONFIG_FIXTURE_NET0_LABEL, CONFIG_FIXTURE_NET0_CHANNEL},
     {CONFIG_FIXTURE_NET1_LABEL, CONFIG_FIXTURE_NET1_CHANNEL},
@@ -67,6 +112,13 @@ static const fixture_net_entry_t s_net_map[] = {
     {CONFIG_FIXTURE_NET5_LABEL, CONFIG_FIXTURE_NET5_CHANNEL},
     {CONFIG_FIXTURE_NET6_LABEL, CONFIG_FIXTURE_NET6_CHANNEL},
     {CONFIG_FIXTURE_NET7_LABEL, CONFIG_FIXTURE_NET7_CHANNEL},
+};
+
+static const fixture_digital_input_entry_t s_digital_inputs[] = {
+    {CONFIG_FIXTURE_DIN0_LABEL, CONFIG_FIXTURE_DIN0_GPIO, CONFIG_FIXTURE_DIN0_ACTIVE_LOW, CONFIG_FIXTURE_DIN0_PULLUP, CONFIG_FIXTURE_DIN0_PULLDOWN},
+    {CONFIG_FIXTURE_DIN1_LABEL, CONFIG_FIXTURE_DIN1_GPIO, CONFIG_FIXTURE_DIN1_ACTIVE_LOW, CONFIG_FIXTURE_DIN1_PULLUP, CONFIG_FIXTURE_DIN1_PULLDOWN},
+    {CONFIG_FIXTURE_DIN2_LABEL, CONFIG_FIXTURE_DIN2_GPIO, CONFIG_FIXTURE_DIN2_ACTIVE_LOW, CONFIG_FIXTURE_DIN2_PULLUP, CONFIG_FIXTURE_DIN2_PULLDOWN},
+    {CONFIG_FIXTURE_DIN3_LABEL, CONFIG_FIXTURE_DIN3_GPIO, CONFIG_FIXTURE_DIN3_ACTIVE_LOW, CONFIG_FIXTURE_DIN3_PULLUP, CONFIG_FIXTURE_DIN3_PULLDOWN},
 };
 
 #if CONFIG_FIXTURE_WIFI_MODE_STA
@@ -103,6 +155,48 @@ static bool output_gpio_is_usable(int gpio)
 static bool output_gpio_config_is_ok(int gpio)
 {
     return !gpio_is_enabled(gpio) || GPIO_IS_VALID_OUTPUT_GPIO((gpio_num_t)gpio);
+}
+
+static bool input_gpio_config_is_ok(int gpio)
+{
+    return !gpio_is_enabled(gpio) || GPIO_IS_VALID_GPIO((gpio_num_t)gpio);
+}
+
+static bool gpio_conflicts_with_fixture_output(int gpio)
+{
+    if (!gpio_is_enabled(gpio)) {
+        return false;
+    }
+    return gpio == CONFIG_FIXTURE_RESET_GPIO ||
+           gpio == CONFIG_FIXTURE_LOAD_SWITCH_GPIO ||
+           gpio == CONFIG_FIXTURE_MUX_SEL0_GPIO ||
+           gpio == CONFIG_FIXTURE_MUX_SEL1_GPIO ||
+           gpio == CONFIG_FIXTURE_MUX_SEL2_GPIO;
+}
+
+static int configured_adc_gpio(void)
+{
+#if CONFIG_FIXTURE_ADC_ENABLE
+    if (CONFIG_FIXTURE_ADC_UNIT == 1) {
+        const int adc1_gpios[] = {36, 37, 38, 39, 32, 33, 34, 35};
+        if (CONFIG_FIXTURE_ADC_CHANNEL >= 0 &&
+            CONFIG_FIXTURE_ADC_CHANNEL < (int)(sizeof(adc1_gpios) / sizeof(adc1_gpios[0]))) {
+            return adc1_gpios[CONFIG_FIXTURE_ADC_CHANNEL];
+        }
+    } else if (CONFIG_FIXTURE_ADC_UNIT == 2) {
+        const int adc2_gpios[] = {4, 0, 2, 15, 13, 12, 14, 27, 25, 26};
+        if (CONFIG_FIXTURE_ADC_CHANNEL >= 0 &&
+            CONFIG_FIXTURE_ADC_CHANNEL < (int)(sizeof(adc2_gpios) / sizeof(adc2_gpios[0]))) {
+            return adc2_gpios[CONFIG_FIXTURE_ADC_CHANNEL];
+        }
+    }
+#endif
+    return -1;
+}
+
+static bool gpio_conflicts_with_adc(int gpio)
+{
+    return gpio_is_enabled(gpio) && configured_adc_gpio() == gpio;
 }
 
 static bool gpio_is_boot_strapping_pin(int gpio)
@@ -340,6 +434,68 @@ static const fixture_net_entry_t *find_net_entry(const char *label)
     return NULL;
 }
 
+static bool digital_input_entry_is_enabled(const fixture_digital_input_entry_t *entry)
+{
+    return net_label_is_enabled(entry->label) && gpio_is_enabled(entry->gpio);
+}
+
+static bool digital_input_entry_is_valid(const fixture_digital_input_entry_t *entry)
+{
+    return digital_input_entry_is_enabled(entry) &&
+           input_gpio_config_is_ok(entry->gpio) &&
+           !gpio_conflicts_with_fixture_output(entry->gpio) &&
+           !(entry->pullup && entry->pulldown);
+}
+
+static int count_enabled_digital_inputs(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (digital_input_entry_is_enabled(&s_digital_inputs[i])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_invalid_digital_inputs(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (digital_input_entry_is_enabled(&s_digital_inputs[i]) &&
+            !digital_input_entry_is_valid(&s_digital_inputs[i])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_boot_strapping_digital_inputs(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (digital_input_entry_is_enabled(&s_digital_inputs[i]) &&
+            gpio_is_boot_strapping_pin(s_digital_inputs[i].gpio)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static const fixture_digital_input_entry_t *find_digital_input_entry(const char *label)
+{
+    if (!net_label_is_enabled(label)) {
+        return NULL;
+    }
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (digital_input_entry_is_enabled(&s_digital_inputs[i]) &&
+            strcmp(s_digital_inputs[i].label, label) == 0) {
+            return &s_digital_inputs[i];
+        }
+    }
+    return NULL;
+}
+
 static void configure_output_gpio(int gpio, int initial_level)
 {
     if (!output_gpio_is_usable(gpio)) {
@@ -355,6 +511,31 @@ static void configure_output_gpio(int gpio, int initial_level)
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
     ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)gpio, initial_level));
+}
+
+static void configure_input_gpio(const fixture_digital_input_entry_t *entry)
+{
+    if (!digital_input_entry_is_enabled(entry)) {
+        return;
+    }
+    if (!digital_input_entry_is_valid(entry)) {
+        ESP_LOGW(TAG, "Digital input %s on GPIO%d is not valid; skipping it", entry->label, entry->gpio);
+        return;
+    }
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << entry->gpio,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = entry->pullup ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+        .pull_down_en = entry->pulldown ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+}
+
+static bool digital_input_active_state(const fixture_digital_input_entry_t *entry, int raw_level)
+{
+    return entry->active_low ? raw_level == 0 : raw_level != 0;
 }
 
 static void set_reset_inactive(void)
@@ -436,7 +617,11 @@ static void append_status_json(char *buf, size_t len)
              "\"adc_scale_denominator\":%d,"
              "\"adc_offset_mv\":%d,"
              "\"adc_unit\":%d,"
-             "\"adc_channel\":%d",
+             "\"adc_channel\":%d,"
+             "\"adc_series_max_points\":%d,"
+             "\"adc_series_max_samples_per_point\":%d,"
+             "\"adc_series_max_interval_ms\":%d,"
+             "\"adc_series_max_total_ms\":%d",
              s_adc_ready ? "true" : "false",
              s_adc_ready ? "" : s_adc_error,
              CONFIG_FIXTURE_ADC_CALIBRATION_ENABLE ? "true" : "false",
@@ -447,7 +632,11 @@ static void append_status_json(char *buf, size_t len)
              CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR,
              CONFIG_FIXTURE_ADC_OFFSET_MV,
              CONFIG_FIXTURE_ADC_UNIT,
-             CONFIG_FIXTURE_ADC_CHANNEL);
+             CONFIG_FIXTURE_ADC_CHANNEL,
+             CONFIG_FIXTURE_ADC_SERIES_MAX_POINTS,
+             CONFIG_FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT,
+             CONFIG_FIXTURE_ADC_SERIES_MAX_INTERVAL_MS,
+             CONFIG_FIXTURE_ADC_SERIES_MAX_TOTAL_MS);
 #else
     snprintf(adc_json, sizeof(adc_json), ",\"adc_enabled\":false,\"adc_ready\":false");
 #endif
@@ -463,7 +652,9 @@ static void append_status_json(char *buf, size_t len)
              "\"load_switch_enabled\":%s,"
              "\"reset_gpio\":%d,"
              "\"load_switch_gpio\":%d,"
-             "\"mux_gpios\":[%d,%d,%d]"
+             "\"mux_gpios\":[%d,%d,%d],"
+             "\"digital_input_count\":%d,"
+             "\"invalid_digital_input_count\":%d"
              "%s}",
              CONFIG_FIXTURE_MCP_ENDPOINT,
              s_ip_addr,
@@ -476,6 +667,8 @@ static void append_status_json(char *buf, size_t len)
              CONFIG_FIXTURE_MUX_SEL0_GPIO,
              CONFIG_FIXTURE_MUX_SEL1_GPIO,
              CONFIG_FIXTURE_MUX_SEL2_GPIO,
+             count_enabled_digital_inputs(),
+             count_invalid_digital_inputs(),
              adc_json);
 }
 
@@ -521,6 +714,53 @@ static void append_net_map_json(char *buf, size_t len)
     json_appendf(buf, len, &offset, "]}");
 }
 
+static void append_digital_inputs_json(char *buf, size_t len)
+{
+    const int entry_count = count_enabled_digital_inputs();
+    const int invalid_entry_count = count_invalid_digital_inputs();
+    size_t offset = 0;
+    bool first = true;
+
+    json_appendf(buf,
+                 len,
+                 &offset,
+                 "{\"ok\":%s,"
+                 "\"entry_count\":%d,"
+                 "\"invalid_entry_count\":%d,"
+                 "\"entries\":[",
+                 invalid_entry_count == 0 ? "true" : "false",
+                 entry_count,
+                 invalid_entry_count);
+
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        const fixture_digital_input_entry_t *entry = &s_digital_inputs[i];
+        if (!digital_input_entry_is_enabled(entry)) {
+            continue;
+        }
+        if (!first) {
+            json_appendf(buf, len, &offset, ",");
+        }
+        first = false;
+        json_appendf(buf, len, &offset, "{\"label\":");
+        json_append_escaped_string(buf, len, &offset, entry->label);
+        json_appendf(buf,
+                     len,
+                     &offset,
+                     ",\"gpio\":%d,"
+                     "\"active_low\":%s,"
+                     "\"pullup\":%s,"
+                     "\"pulldown\":%s,"
+                     "\"valid\":%s}",
+                     entry->gpio,
+                     entry->active_low ? "true" : "false",
+                     entry->pullup ? "true" : "false",
+                     entry->pulldown ? "true" : "false",
+                     digital_input_entry_is_valid(entry) ? "true" : "false");
+    }
+
+    json_appendf(buf, len, &offset, "]}");
+}
+
 static esp_mcp_value_t ping_callback(const esp_mcp_property_list_t *properties)
 {
     (void)properties;
@@ -534,7 +774,7 @@ static esp_mcp_value_t ping_callback(const esp_mcp_property_list_t *properties)
 static esp_mcp_value_t get_status_callback(const esp_mcp_property_list_t *properties)
 {
     (void)properties;
-    char payload[1024];
+    char payload[1280];
     append_status_json(payload, sizeof(payload));
     return json_value(payload);
 }
@@ -550,20 +790,36 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
     const bool mux_settle_ok = CONFIG_FIXTURE_MUX_SETTLE_MS <= CONFIG_FIXTURE_MAX_MUX_SETTLE_MS;
     const int net_map_entry_count = count_enabled_net_entries();
     const int invalid_net_map_entries = count_invalid_net_entries();
+    const int digital_input_count = count_enabled_digital_inputs();
+    const int invalid_digital_inputs = count_invalid_digital_inputs();
+    const int boot_strapping_digital_inputs = count_boot_strapping_digital_inputs();
 #if CONFIG_FIXTURE_ADC_ENABLE
     const bool adc_ok = s_adc_ready;
     const bool adc_scale_ok = CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR > 0;
+    const bool adc_series_limits_ok = CONFIG_FIXTURE_ADC_SERIES_MAX_POINTS >= 4 &&
+                                      CONFIG_FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT >= 4 &&
+                                      CONFIG_FIXTURE_ADC_SERIES_MAX_INTERVAL_MS >= 20 &&
+                                      CONFIG_FIXTURE_ADC_SERIES_MAX_TOTAL_MS >= 100;
 #else
     const bool adc_ok = true;
     const bool adc_scale_ok = true;
+    const bool adc_series_limits_ok = true;
 #endif
-    const bool ok = invalid_output_gpios == 0 && mux_config_ok && mux_settle_ok && invalid_net_map_entries == 0 && adc_ok && adc_scale_ok;
+    const bool ok = invalid_output_gpios == 0 &&
+                    mux_config_ok &&
+                    mux_settle_ok &&
+                    invalid_net_map_entries == 0 &&
+                    invalid_digital_inputs == 0 &&
+                    adc_ok &&
+                    adc_scale_ok &&
+                    adc_series_limits_ok;
 
-    char payload[1408];
+    char payload[2048];
     snprintf(payload, sizeof(payload),
              "{\"ok\":%s,"
              "\"invalid_output_gpio_count\":%d,"
              "\"boot_strapping_gpio_count\":%d,"
+             "\"boot_strapping_digital_input_count\":%d,"
              "\"reset_gpio_ok\":%s,"
              "\"load_switch_gpio_ok\":%s,"
              "\"mux_max_channel\":%d,"
@@ -576,6 +832,9 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              "\"net_map_entry_count\":%d,"
              "\"invalid_net_map_entry_count\":%d,"
              "\"net_map_ok\":%s,"
+             "\"digital_input_count\":%d,"
+             "\"invalid_digital_input_count\":%d,"
+             "\"digital_inputs_ok\":%s,"
              "\"free_heap_bytes\":%u,"
              "\"minimum_free_heap_bytes\":%u,"
              "\"adc_enabled\":%s,"
@@ -586,7 +845,12 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              "\"adc_scale_numerator\":%d,"
              "\"adc_scale_denominator\":%d,"
              "\"adc_offset_mv\":%d,"
-             "\"adc_scale_ok\":%s"
+             "\"adc_scale_ok\":%s,"
+             "\"adc_series_max_points\":%d,"
+             "\"adc_series_max_samples_per_point\":%d,"
+             "\"adc_series_max_interval_ms\":%d,"
+             "\"adc_series_max_total_ms\":%d,"
+             "\"adc_series_limits_ok\":%s"
 #if CONFIG_FIXTURE_ADC_ENABLE
              ",\"adc_error\":\"%s\","
              "\"adc_calibration_error\":\"%s\""
@@ -595,6 +859,7 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              ok ? "true" : "false",
              invalid_output_gpios,
              boot_strapping_gpios,
+             boot_strapping_digital_inputs,
              output_gpio_config_is_ok(CONFIG_FIXTURE_RESET_GPIO) ? "true" : "false",
              output_gpio_config_is_ok(CONFIG_FIXTURE_LOAD_SWITCH_GPIO) ? "true" : "false",
              CONFIG_FIXTURE_MUX_MAX_CHANNEL,
@@ -609,6 +874,9 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              net_map_entry_count,
              invalid_net_map_entries,
              invalid_net_map_entries == 0 ? "true" : "false",
+             digital_input_count,
+             invalid_digital_inputs,
+             invalid_digital_inputs == 0 ? "true" : "false",
              (unsigned int)esp_get_free_heap_size(),
              (unsigned int)esp_get_minimum_free_heap_size(),
 #if CONFIG_FIXTURE_ADC_ENABLE
@@ -621,6 +889,11 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR,
              CONFIG_FIXTURE_ADC_OFFSET_MV,
              adc_scale_ok ? "true" : "false",
+             CONFIG_FIXTURE_ADC_SERIES_MAX_POINTS,
+             CONFIG_FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT,
+             CONFIG_FIXTURE_ADC_SERIES_MAX_INTERVAL_MS,
+             CONFIG_FIXTURE_ADC_SERIES_MAX_TOTAL_MS,
+             adc_series_limits_ok ? "true" : "false",
              s_adc_ready ? "" : s_adc_error,
              s_adc_cali_ready ? "" : s_adc_cali_error
 #else
@@ -631,6 +904,11 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              0,
              1,
              1,
+             0,
+             "true",
+             0,
+             0,
+             0,
              0,
              "true"
 #endif
@@ -763,6 +1041,97 @@ static esp_mcp_value_t set_load_switch_callback(const esp_mcp_property_list_t *p
     return json_value(payload);
 }
 
+static esp_mcp_value_t read_digital_input_callback(const esp_mcp_property_list_t *properties)
+{
+    const char *label = esp_mcp_property_list_get_property_string(properties, "label");
+    if (!net_label_is_enabled(label)) {
+        return json_value("{\"ok\":false,\"error\":\"missing_label\"}");
+    }
+
+    const fixture_digital_input_entry_t *entry = find_digital_input_entry(label);
+    if (!entry) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"unknown_digital_input\",\"label\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, label);
+        json_appendf(payload, sizeof(payload), &offset, "}");
+        return json_value(payload);
+    }
+    if (!digital_input_entry_is_valid(entry)) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"invalid_digital_input\",\"label\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_appendf(payload, sizeof(payload), &offset, ",\"gpio\":%d}", entry->gpio);
+        return json_value(payload);
+    }
+
+    const int raw_level = gpio_get_level((gpio_num_t)entry->gpio);
+    char payload[256];
+    size_t offset = 0;
+    json_appendf(payload, sizeof(payload), &offset, "{\"ok\":true,\"label\":");
+    json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+    json_appendf(payload,
+                 sizeof(payload),
+                 &offset,
+                 ",\"gpio\":%d,\"raw_level\":%d,\"active\":%s,\"active_low\":%s}",
+                 entry->gpio,
+                 raw_level,
+                 digital_input_active_state(entry, raw_level) ? "true" : "false",
+                 entry->active_low ? "true" : "false");
+    return json_value(payload);
+}
+
+static esp_mcp_value_t scan_digital_inputs_callback(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    const int invalid_entry_count = count_invalid_digital_inputs();
+    if (invalid_entry_count > 0) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"digital_input_map_invalid\",\"invalid_entry_count\":%d}",
+                 invalid_entry_count);
+        return json_value(payload);
+    }
+
+    char payload[1536];
+    size_t offset = 0;
+    bool first = true;
+    int scanned_count = 0;
+    json_appendf(payload,
+                 sizeof(payload),
+                 &offset,
+                 "{\"ok\":true,\"entry_count\":%d,\"readings\":[",
+                 count_enabled_digital_inputs());
+
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        const fixture_digital_input_entry_t *entry = &s_digital_inputs[i];
+        if (!digital_input_entry_is_enabled(entry)) {
+            continue;
+        }
+        const int raw_level = gpio_get_level((gpio_num_t)entry->gpio);
+        if (!first) {
+            json_appendf(payload, sizeof(payload), &offset, ",");
+        }
+        first = false;
+        scanned_count++;
+        json_appendf(payload, sizeof(payload), &offset, "{\"label\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     ",\"gpio\":%d,\"raw_level\":%d,\"active\":%s,\"active_low\":%s}",
+                     entry->gpio,
+                     raw_level,
+                     digital_input_active_state(entry, raw_level) ? "true" : "false",
+                     entry->active_low ? "true" : "false");
+    }
+
+    json_appendf(payload, sizeof(payload), &offset, "],\"scanned_count\":%d}", scanned_count);
+    return json_value(payload);
+}
+
 #if CONFIG_FIXTURE_ADC_ENABLE
 typedef struct {
     int samples;
@@ -854,6 +1223,48 @@ static esp_err_t read_adc_average(int samples, adc_reading_t *reading)
         }
     }
     return ESP_OK;
+}
+
+static bool append_adc_reading_json_fields(char *payload, size_t len, size_t *offset, const adc_reading_t *reading)
+{
+    bool ok = json_appendf(payload,
+                           len,
+                           offset,
+                           "\"samples\":%d,"
+                           "\"raw_avg\":%d,"
+                           "\"raw_min\":%d,"
+                           "\"raw_max\":%d,"
+                           "\"raw_last\":%d,"
+                           "\"millivolts_valid\":%s,"
+                           "\"scaled_millivolts_valid\":%s",
+                           reading->samples,
+                           reading->raw_avg,
+                           reading->raw_min,
+                           reading->raw_max,
+                           reading->raw_last,
+                           reading->millivolts_valid ? "true" : "false",
+                           reading->scaled_millivolts_valid ? "true" : "false");
+    if (ok && reading->millivolts_valid) {
+        ok = json_appendf(payload,
+                          len,
+                          offset,
+                          ",\"mv_avg\":%d,\"mv_min\":%d,\"mv_max\":%d,\"mv_last\":%d",
+                          reading->mv_avg,
+                          reading->mv_min,
+                          reading->mv_max,
+                          reading->mv_last);
+    }
+    if (ok && reading->scaled_millivolts_valid) {
+        ok = json_appendf(payload,
+                          len,
+                          offset,
+                          ",\"scaled_mv_avg\":%d,\"scaled_mv_min\":%d,\"scaled_mv_max\":%d,\"scaled_mv_last\":%d",
+                          reading->scaled_mv_avg,
+                          reading->scaled_mv_min,
+                          reading->scaled_mv_max,
+                          reading->scaled_mv_last);
+    }
+    return ok;
 }
 
 static esp_mcp_value_t read_adc_raw_callback(const esp_mcp_property_list_t *properties)
@@ -1059,6 +1470,343 @@ static esp_mcp_value_t read_net_adc_raw_callback(const esp_mcp_property_list_t *
     json_appendf(payload, sizeof(payload), &offset, "}");
     return json_value(payload);
 }
+
+static esp_mcp_value_t sample_net_adc_series_callback(const esp_mcp_property_list_t *properties)
+{
+    if (!s_adc_ready) {
+        char payload[160];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"adc_not_ready\",\"detail\":\"%s\"}",
+                 s_adc_error);
+        return json_value(payload);
+    }
+
+    const char *net = esp_mcp_property_list_get_property_string(properties, "net");
+    if (!net_label_is_enabled(net)) {
+        return json_value("{\"ok\":false,\"error\":\"missing_net\"}");
+    }
+
+    const fixture_net_entry_t *entry = find_net_entry(net);
+    if (!entry) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"unknown_net\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, net);
+        json_appendf(payload, sizeof(payload), &offset, "}");
+        return json_value(payload);
+    }
+
+    if (entry->channel < 0 || entry->channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     "{\"ok\":false,\"error\":\"net_channel_out_of_range\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     ",\"mux_channel\":%d,\"max_channel\":%d}",
+                     entry->channel,
+                     CONFIG_FIXTURE_MUX_MAX_CHANNEL);
+        return json_value(payload);
+    }
+
+    if (!mux_channel_can_be_selected(entry->channel)) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     "{\"ok\":false,\"error\":\"net_channel_not_representable\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry->channel);
+        return json_value(payload);
+    }
+
+    int settle_ms = esp_mcp_property_list_get_property_int(properties, "settle_ms");
+    if (settle_ms <= 0) {
+        settle_ms = CONFIG_FIXTURE_MUX_SETTLE_MS;
+    }
+    if (settle_ms > CONFIG_FIXTURE_MAX_MUX_SETTLE_MS) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"settle_too_long\",\"max_settle_ms\":%d}",
+                 CONFIG_FIXTURE_MAX_MUX_SETTLE_MS);
+        return json_value(payload);
+    }
+
+    const int points = esp_mcp_property_list_get_property_int(properties, "points");
+    if (points < 1 || points > CONFIG_FIXTURE_ADC_SERIES_MAX_POINTS) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"points_out_of_range\",\"max_points\":%d}",
+                 CONFIG_FIXTURE_ADC_SERIES_MAX_POINTS);
+        return json_value(payload);
+    }
+
+    const int samples_per_point = esp_mcp_property_list_get_property_int(properties, "samples_per_point");
+    if (samples_per_point < 1 || samples_per_point > CONFIG_FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT) {
+        char payload[192];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"samples_per_point_out_of_range\",\"max_samples_per_point\":%d}",
+                 CONFIG_FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT);
+        return json_value(payload);
+    }
+
+    const int interval_ms = esp_mcp_property_list_get_property_int(properties, "interval_ms");
+    if (interval_ms < 0 || interval_ms > CONFIG_FIXTURE_ADC_SERIES_MAX_INTERVAL_MS) {
+        char payload[192];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"interval_out_of_range\",\"max_interval_ms\":%d}",
+                 CONFIG_FIXTURE_ADC_SERIES_MAX_INTERVAL_MS);
+        return json_value(payload);
+    }
+
+    const int64_t requested_wait_ms = points > 1 ? (int64_t)(points - 1) * interval_ms : 0;
+    if (requested_wait_ms > CONFIG_FIXTURE_ADC_SERIES_MAX_TOTAL_MS) {
+        char payload[192];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"series_too_long\",\"max_total_ms\":%d}",
+                 CONFIG_FIXTURE_ADC_SERIES_MAX_TOTAL_MS);
+        return json_value(payload);
+    }
+
+    set_mux_channel(entry->channel);
+    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
+    if (settle_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(settle_ms));
+    }
+
+    char *payload = calloc(1, 6144);
+    if (!payload) {
+        return json_value("{\"ok\":false,\"error\":\"out_of_memory\"}");
+    }
+
+    const size_t payload_len = 6144;
+    size_t offset = 0;
+    bool json_ok = true;
+    const int64_t start_ms = esp_timer_get_time() / 1000;
+
+    json_ok = json_ok && json_appendf(payload, payload_len, &offset, "{\"ok\":true,\"net\":");
+    json_ok = json_ok && json_append_escaped_string(payload, payload_len, &offset, entry->label);
+    json_ok = json_ok && json_appendf(payload,
+                                      payload_len,
+                                      &offset,
+                                      ",\"mux_channel\":%d,"
+                                      "\"settle_ms\":%d,"
+                                      "\"adc_unit\":%d,"
+                                      "\"adc_channel\":%d,"
+                                      "\"points\":%d,"
+                                      "\"samples_per_point\":%d,"
+                                      "\"interval_ms\":%d,"
+                                      "\"max_total_ms\":%d,"
+                                      "\"readings\":[",
+                                      s_mux_channel,
+                                      settle_ms,
+                                      CONFIG_FIXTURE_ADC_UNIT,
+                                      CONFIG_FIXTURE_ADC_CHANNEL,
+                                      points,
+                                      samples_per_point,
+                                      interval_ms,
+                                      CONFIG_FIXTURE_ADC_SERIES_MAX_TOTAL_MS);
+
+    for (int i = 0; json_ok && i < points; i++) {
+        adc_reading_t reading = {0};
+        esp_err_t ret = read_adc_average(samples_per_point, &reading);
+        if (ret != ESP_OK) {
+            free(payload);
+            char error_payload[192];
+            snprintf(error_payload,
+                     sizeof(error_payload),
+                     "{\"ok\":false,\"error\":\"adc_read_failed\",\"esp_err\":\"%s\",\"point_index\":%d}",
+                     esp_err_to_name(ret),
+                     i);
+            return json_value(error_payload);
+        }
+
+        if (i > 0) {
+            json_ok = json_ok && json_appendf(payload, payload_len, &offset, ",");
+        }
+        json_ok = json_ok && json_appendf(payload,
+                                          payload_len,
+                                          &offset,
+                                          "{\"index\":%d,\"t_ms\":%lld,",
+                                          i,
+                                          (long long)((esp_timer_get_time() / 1000) - start_ms));
+        json_ok = json_ok && append_adc_reading_json_fields(payload, payload_len, &offset, &reading);
+        json_ok = json_ok && json_appendf(payload, payload_len, &offset, "}");
+
+        if (i + 1 < points && interval_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+        }
+    }
+
+    json_ok = json_ok && json_appendf(payload,
+                                      payload_len,
+                                      &offset,
+                                      "],\"elapsed_ms\":%lld}",
+                                      (long long)((esp_timer_get_time() / 1000) - start_ms));
+
+    if (!json_ok) {
+        free(payload);
+        return json_value("{\"ok\":false,\"error\":\"response_too_large\"}");
+    }
+
+    esp_mcp_value_t value = json_value(payload);
+    free(payload);
+    return value;
+}
+
+static esp_mcp_value_t scan_net_adc_callback(const esp_mcp_property_list_t *properties)
+{
+    if (!s_adc_ready) {
+        char payload[160];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"adc_not_ready\",\"detail\":\"%s\"}",
+                 s_adc_error);
+        return json_value(payload);
+    }
+
+    const int invalid_net_entries = count_invalid_net_entries();
+    if (invalid_net_entries > 0) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"net_map_invalid\",\"invalid_entry_count\":%d}",
+                 invalid_net_entries);
+        return json_value(payload);
+    }
+
+    const int enabled_net_entries = count_enabled_net_entries();
+    if (enabled_net_entries <= 0) {
+        return json_value("{\"ok\":false,\"error\":\"net_map_empty\"}");
+    }
+
+    int samples = esp_mcp_property_list_get_property_int(properties, "samples");
+    if (samples <= 0) {
+        samples = 8;
+    }
+    if (samples > 64) {
+        return json_value("{\"ok\":false,\"error\":\"samples_out_of_range\",\"max_samples\":64}");
+    }
+
+    int settle_ms = esp_mcp_property_list_get_property_int(properties, "settle_ms");
+    if (settle_ms <= 0) {
+        settle_ms = CONFIG_FIXTURE_MUX_SETTLE_MS;
+    }
+    if (settle_ms > CONFIG_FIXTURE_MAX_MUX_SETTLE_MS) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"settle_too_long\",\"max_settle_ms\":%d}",
+                 CONFIG_FIXTURE_MAX_MUX_SETTLE_MS);
+        return json_value(payload);
+    }
+
+    char *payload = calloc(1, 6144);
+    if (!payload) {
+        return json_value("{\"ok\":false,\"error\":\"out_of_memory\"}");
+    }
+
+    const size_t payload_len = 6144;
+    size_t offset = 0;
+    bool json_ok = true;
+    bool first = true;
+    int scanned_count = 0;
+    const int64_t start_ms = esp_timer_get_time() / 1000;
+
+    json_ok = json_ok && json_appendf(payload,
+                                      payload_len,
+                                      &offset,
+                                      "{\"ok\":true,"
+                                      "\"entry_count\":%d,"
+                                      "\"settle_ms\":%d,"
+                                      "\"adc_unit\":%d,"
+                                      "\"adc_channel\":%d,"
+                                      "\"samples\":%d,"
+                                      "\"readings\":[",
+                                      enabled_net_entries,
+                                      settle_ms,
+                                      CONFIG_FIXTURE_ADC_UNIT,
+                                      CONFIG_FIXTURE_ADC_CHANNEL,
+                                      samples);
+
+    for (size_t i = 0; json_ok && i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
+        const fixture_net_entry_t *entry = &s_net_map[i];
+        if (!net_label_is_enabled(entry->label)) {
+            continue;
+        }
+
+        if (!net_entry_is_selectable(entry)) {
+            free(payload);
+            char error_payload[192];
+            snprintf(error_payload,
+                     sizeof(error_payload),
+                     "{\"ok\":false,\"error\":\"net_entry_not_selectable\",\"index\":%u}",
+                     (unsigned int)i);
+            return json_value(error_payload);
+        }
+
+        set_mux_channel(entry->channel);
+        snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
+        if (settle_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(settle_ms));
+        }
+
+        adc_reading_t reading = {0};
+        esp_err_t ret = read_adc_average(samples, &reading);
+        if (ret != ESP_OK) {
+            free(payload);
+            char error_payload[192];
+            snprintf(error_payload,
+                     sizeof(error_payload),
+                     "{\"ok\":false,\"error\":\"adc_read_failed\",\"esp_err\":\"%s\",\"net_index\":%u}",
+                     esp_err_to_name(ret),
+                     (unsigned int)i);
+            return json_value(error_payload);
+        }
+
+        if (!first) {
+            json_ok = json_ok && json_appendf(payload, payload_len, &offset, ",");
+        }
+        first = false;
+        scanned_count++;
+        json_ok = json_ok && json_appendf(payload, payload_len, &offset, "{\"net\":");
+        json_ok = json_ok && json_append_escaped_string(payload, payload_len, &offset, entry->label);
+        json_ok = json_ok && json_appendf(payload,
+                                          payload_len,
+                                          &offset,
+                                          ",\"mux_channel\":%d,"
+                                          "\"t_ms\":%lld,",
+                                          entry->channel,
+                                          (long long)((esp_timer_get_time() / 1000) - start_ms));
+        json_ok = json_ok && append_adc_reading_json_fields(payload, payload_len, &offset, &reading);
+        json_ok = json_ok && json_appendf(payload, payload_len, &offset, "}");
+    }
+
+    json_ok = json_ok && json_appendf(payload,
+                                      payload_len,
+                                      &offset,
+                                      "],\"scanned_count\":%d,\"elapsed_ms\":%lld}",
+                                      scanned_count,
+                                      (long long)((esp_timer_get_time() / 1000) - start_ms));
+
+    if (!json_ok) {
+        free(payload);
+        return json_value("{\"ok\":false,\"error\":\"response_too_large\"}");
+    }
+
+    esp_mcp_value_t value = json_value(payload);
+    free(payload);
+    return value;
+}
 #endif
 
 static esp_err_t read_status_resource(const char *uri,
@@ -1077,7 +1825,7 @@ static esp_err_t read_status_resource(const char *uri,
         return ESP_ERR_NO_MEM;
     }
 
-    char payload[1024];
+    char payload[1280];
     append_status_json(payload, sizeof(payload));
     *out_text = strdup(payload);
     if (!*out_text) {
@@ -1106,6 +1854,33 @@ static esp_err_t read_net_map_resource(const char *uri,
 
     char payload[1536];
     append_net_map_json(payload, sizeof(payload));
+    *out_text = strdup(payload);
+    if (!*out_text) {
+        free(*out_mime);
+        *out_mime = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t read_digital_inputs_resource(const char *uri,
+                                              char **out_mime,
+                                              char **out_text,
+                                              char **out_blob,
+                                              void *ctx)
+{
+    (void)uri;
+    (void)ctx;
+    ESP_RETURN_ON_FALSE(out_mime && out_text && out_blob, ESP_ERR_INVALID_ARG, TAG, "Invalid resource output");
+
+    *out_mime = strdup("application/json");
+    *out_blob = NULL;
+    if (!*out_mime) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    char payload[1536];
+    append_digital_inputs_json(payload, sizeof(payload));
     *out_text = strdup(payload);
     if (!*out_text) {
         free(*out_mime);
@@ -1263,6 +2038,13 @@ static void init_fixture_io(void)
     configure_output_gpio(CONFIG_FIXTURE_MUX_SEL2_GPIO, 0);
     set_mux_channel(0);
     set_load_switch(false);
+
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (digital_input_entry_is_enabled(&s_digital_inputs[i])) {
+            warn_if_boot_strapping_gpio(s_digital_inputs[i].label, s_digital_inputs[i].gpio);
+            configure_input_gpio(&s_digital_inputs[i]);
+        }
+    }
 }
 
 #if CONFIG_FIXTURE_ADC_ENABLE
@@ -1429,6 +2211,27 @@ static void register_fixture_tools(esp_mcp_t *mcp)
         "{\"audience\":[\"assistant\"],\"priority\":0.4,\"risk\":\"high\"}"));
     ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
 
+    tool = esp_mcp_tool_create("fixture.read_digital_input",
+                               "Read one configured digital input by label.",
+                               read_digital_input_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_string("label", CONFIG_FIXTURE_DIN0_LABEL)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.75,\"risk\":\"low\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
+    tool = esp_mcp_tool_create("fixture.scan_digital_inputs",
+                               "Read all configured digital inputs.",
+                               scan_digital_inputs_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.8,\"risk\":\"low\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
 #if CONFIG_FIXTURE_ADC_ENABLE
     tool = esp_mcp_tool_create("fixture.read_adc_raw",
                                "Read averaged raw ADC samples from the configured fixture ADC channel.",
@@ -1459,6 +2262,57 @@ static void register_fixture_tools(esp_mcp_t *mcp)
         tool,
         "{\"audience\":[\"assistant\"],\"priority\":0.8,\"risk\":\"medium\"}"));
     add_tool_or_abort(mcp, tool);
+
+    tool = esp_mcp_tool_create("fixture.scan_net_adc",
+                               "Scan all configured net/testpoint labels and return a bounded ADC snapshot.",
+                               scan_net_adc_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("samples", 8, 1, 64)));
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("settle_ms",
+                                                   CONFIG_FIXTURE_MUX_SETTLE_MS,
+                                                   0,
+                                                   CONFIG_FIXTURE_MAX_MUX_SETTLE_MS)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.85,\"risk\":\"medium\"}"));
+    add_tool_or_abort(mcp, tool);
+
+    tool = esp_mcp_tool_create("fixture.sample_net_adc_series",
+                               "Select a configured net/testpoint and return a bounded time series of averaged ADC samples.",
+                               sample_net_adc_series_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_string("net", CONFIG_FIXTURE_NET0_LABEL)));
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("points", 4, 1, CONFIG_FIXTURE_ADC_SERIES_MAX_POINTS)));
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("samples_per_point",
+                                                   4,
+                                                   1,
+                                                   CONFIG_FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT)));
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("interval_ms",
+                                                   20,
+                                                   0,
+                                                   CONFIG_FIXTURE_ADC_SERIES_MAX_INTERVAL_MS)));
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("settle_ms",
+                                                   CONFIG_FIXTURE_MUX_SETTLE_MS,
+                                                   0,
+                                                   CONFIG_FIXTURE_MAX_MUX_SETTLE_MS)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.85,\"risk\":\"medium\"}"));
+    add_tool_or_abort(mcp, tool);
 #endif
 }
 
@@ -1484,6 +2338,17 @@ static void register_fixture_resources(esp_mcp_t *mcp)
                                        NULL);
     ESP_ERROR_CHECK(resource ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_mcp_resource_set_annotations(resource, "[\"assistant\",\"user\"]", 0.9, NULL));
+    ESP_ERROR_CHECK(esp_mcp_add_resource(mcp, resource));
+
+    resource = esp_mcp_resource_create("fixture://digital-inputs",
+                                       "fixture.digital_inputs",
+                                       "Fixture Digital Inputs",
+                                       "Configured digital input labels mapped to ESP32 GPIOs.",
+                                       "application/json",
+                                       read_digital_inputs_resource,
+                                       NULL);
+    ESP_ERROR_CHECK(resource ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_resource_set_annotations(resource, "[\"assistant\",\"user\"]", 0.8, NULL));
     ESP_ERROR_CHECK(esp_mcp_add_resource(mcp, resource));
 }
 

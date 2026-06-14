@@ -208,6 +208,94 @@ menu "AI Hardware Fixture"
 
     endmenu
 
+    menu "Fixture digital input map"
+
+        config FIXTURE_DIN0_LABEL
+            string "Digital input 0 label"
+            default "DIN0"
+
+        config FIXTURE_DIN0_GPIO
+            int "Digital input 0 GPIO"
+            range -1 48
+            default -1
+
+        config FIXTURE_DIN0_ACTIVE_LOW
+            bool "Digital input 0 is active-low"
+            default n
+
+        config FIXTURE_DIN0_PULLUP
+            bool "Enable digital input 0 pull-up"
+            default n
+
+        config FIXTURE_DIN0_PULLDOWN
+            bool "Enable digital input 0 pull-down"
+            default n
+
+        config FIXTURE_DIN1_LABEL
+            string "Digital input 1 label"
+            default "DIN1"
+
+        config FIXTURE_DIN1_GPIO
+            int "Digital input 1 GPIO"
+            range -1 48
+            default -1
+
+        config FIXTURE_DIN1_ACTIVE_LOW
+            bool "Digital input 1 is active-low"
+            default n
+
+        config FIXTURE_DIN1_PULLUP
+            bool "Enable digital input 1 pull-up"
+            default n
+
+        config FIXTURE_DIN1_PULLDOWN
+            bool "Enable digital input 1 pull-down"
+            default n
+
+        config FIXTURE_DIN2_LABEL
+            string "Digital input 2 label"
+            default "DIN2"
+
+        config FIXTURE_DIN2_GPIO
+            int "Digital input 2 GPIO"
+            range -1 48
+            default -1
+
+        config FIXTURE_DIN2_ACTIVE_LOW
+            bool "Digital input 2 is active-low"
+            default n
+
+        config FIXTURE_DIN2_PULLUP
+            bool "Enable digital input 2 pull-up"
+            default n
+
+        config FIXTURE_DIN2_PULLDOWN
+            bool "Enable digital input 2 pull-down"
+            default n
+
+        config FIXTURE_DIN3_LABEL
+            string "Digital input 3 label"
+            default "DIN3"
+
+        config FIXTURE_DIN3_GPIO
+            int "Digital input 3 GPIO"
+            range -1 48
+            default -1
+
+        config FIXTURE_DIN3_ACTIVE_LOW
+            bool "Digital input 3 is active-low"
+            default n
+
+        config FIXTURE_DIN3_PULLUP
+            bool "Enable digital input 3 pull-up"
+            default n
+
+        config FIXTURE_DIN3_PULLDOWN
+            bool "Enable digital input 3 pull-down"
+            default n
+
+    endmenu
+
     config FIXTURE_ADC_ENABLE
         bool "Enable fixture.read_adc_raw"
         default y
@@ -268,5 +356,35 @@ menu "AI Hardware Fixture"
         depends on FIXTURE_ADC_ENABLE
         range -100000 100000
         default 0
+
+    config FIXTURE_ADC_SERIES_MAX_POINTS
+        int "Maximum points per net ADC series"
+        depends on FIXTURE_ADC_ENABLE
+        range 4 16
+        default 8
+        help
+            Upper bound for fixture.sample_net_adc_series. Keep this small
+            because the MCP response is returned as one JSON payload.
+
+    config FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT
+        int "Maximum ADC samples averaged per series point"
+        depends on FIXTURE_ADC_ENABLE
+        range 4 16
+        default 8
+
+    config FIXTURE_ADC_SERIES_MAX_INTERVAL_MS
+        int "Maximum interval between ADC series points in ms"
+        depends on FIXTURE_ADC_ENABLE
+        range 20 1000
+        default 200
+
+    config FIXTURE_ADC_SERIES_MAX_TOTAL_MS
+        int "Maximum total ADC series wait time in ms"
+        depends on FIXTURE_ADC_ENABLE
+        range 100 10000
+        default 2000
+        help
+            The firmware rejects requests where (points - 1) * interval_ms
+            exceeds this value.
 
 endmenu

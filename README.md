@@ -88,16 +88,17 @@ cd firmware/esp32-fixture
 python3 tools/deploy.py doctor
 python3 tools/deploy.py build
 python3 tools/deploy.py bundle --zip
+python3 tools/deploy.py verify-bundle
 python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --smoke --prompt
 ```
 
-固件使用 4MB ESP32 分区表，factory app 分区为 3MB；构建已用 ESP-IDF v5.4.4 在 ESP32 target 上验证通过，当前 app 约 `0xe5020` 字节，app 分区剩余约 70%。`bundle` 会生成包含 bootloader、partition table、app、`flash_args`、`manifest.json` 和 SHA-256 的烧录包。烧录后连接默认 SoftAP，再运行：
+固件使用 4MB ESP32 分区表，factory app 分区为 3MB；构建已用 ESP-IDF v5.4.4 在 ESP32 target 上验证通过，当前 app 约 `0xe7500` 字节，app 分区剩余约 70%。`bundle` 会生成包含 bootloader、partition table、app、`flash_args`、`manifest.json` 和 SHA-256 的烧录包；`verify-bundle` 会交叉检查 manifest、哈希、flash args 和 app 分区尺寸。烧录后连接默认 SoftAP，再运行：
 
 ```bash
 python3 tools/deploy.py smoke
 ```
 
-第一版工具包括 `fixture.ping`、`fixture.get_status`、`fixture.self_test`、`fixture.set_mux_channel`、`fixture.select_net`、`fixture.reset_dut`、`fixture.set_load_switch`、`fixture.read_adc_raw` 和 `fixture.read_net_adc_raw`。资源包括 `fixture://status` 和 `fixture://net-map`。ADC 工具会返回 raw 采样值，并在校准可用时返回 ADC 引脚毫伏值和按夹具比例换算后的 `scaled_mv_*`。`fixture.self_test` 会检查输出 GPIO、MUX 通道可表示性、网标/测试点映射、ADC 初始化和 heap 状态。真实接板前请先用 `idf.py menuconfig` 检查 GPIO 映射、网标映射、MUX 稳定等待时间、ADC 校准/缩放和动作极性。
+第一版工具包括 `fixture.ping`、`fixture.get_status`、`fixture.self_test`、`fixture.set_mux_channel`、`fixture.select_net`、`fixture.reset_dut`、`fixture.set_load_switch`、`fixture.read_digital_input`、`fixture.scan_digital_inputs`、`fixture.read_adc_raw`、`fixture.read_net_adc_raw`、`fixture.scan_net_adc` 和 `fixture.sample_net_adc_series`。资源包括 `fixture://status`、`fixture://net-map` 和 `fixture://digital-inputs`。ADC 工具会返回 raw 采样值，并在校准可用时返回 ADC 引脚毫伏值和按夹具比例换算后的 `scaled_mv_*`；scan 工具会返回所有已配置网标的快照，series 工具会返回单个网标的短时间序列，数字输入工具用于读取 PGOOD、FAULT、IRQ、BOOT 等状态脚，供 Python 测试站提取信号特征并调用模型诊断。`fixture.self_test` 会检查输出 GPIO、数字输入 GPIO、MUX 通道可表示性、网标/测试点映射、ADC 初始化、series 限制和 heap 状态。真实接板前请先用 `idf.py menuconfig` 检查 GPIO 映射、数字输入映射、网标映射、MUX 稳定等待时间、ADC 校准/缩放、连续采样上限和动作极性。
 
 ## 核心 MCP 表面
 

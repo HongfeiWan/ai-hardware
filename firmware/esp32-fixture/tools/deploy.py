@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import hashlib
 import json
@@ -28,6 +29,7 @@ FLASH_ARGS = BUILD_DIR / "flash_args"
 FLASHER_ARGS_JSON = BUILD_DIR / "flasher_args.json"
 PROJECT_DESCRIPTION_JSON = BUILD_DIR / "project_description.json"
 SMOKE_TEST = PROJECT_DIR / "tools" / "smoke_test.py"
+PARTITIONS_CSV = PROJECT_DIR / "partitions.csv"
 DEFAULT_MCP_HOST = "192.168.4.1"
 DEFAULT_MCP_PORT = 80
 DEFAULT_MCP_ENDPOINT = "mcp"
@@ -60,6 +62,26 @@ MANIFEST_CONFIG_KEYS = (
     "CONFIG_FIXTURE_MUX_SEL2_GPIO",
     "CONFIG_FIXTURE_MUX_MAX_CHANNEL",
     "CONFIG_FIXTURE_MUX_SETTLE_MS",
+    "CONFIG_FIXTURE_DIN0_LABEL",
+    "CONFIG_FIXTURE_DIN0_GPIO",
+    "CONFIG_FIXTURE_DIN0_ACTIVE_LOW",
+    "CONFIG_FIXTURE_DIN0_PULLUP",
+    "CONFIG_FIXTURE_DIN0_PULLDOWN",
+    "CONFIG_FIXTURE_DIN1_LABEL",
+    "CONFIG_FIXTURE_DIN1_GPIO",
+    "CONFIG_FIXTURE_DIN1_ACTIVE_LOW",
+    "CONFIG_FIXTURE_DIN1_PULLUP",
+    "CONFIG_FIXTURE_DIN1_PULLDOWN",
+    "CONFIG_FIXTURE_DIN2_LABEL",
+    "CONFIG_FIXTURE_DIN2_GPIO",
+    "CONFIG_FIXTURE_DIN2_ACTIVE_LOW",
+    "CONFIG_FIXTURE_DIN2_PULLUP",
+    "CONFIG_FIXTURE_DIN2_PULLDOWN",
+    "CONFIG_FIXTURE_DIN3_LABEL",
+    "CONFIG_FIXTURE_DIN3_GPIO",
+    "CONFIG_FIXTURE_DIN3_ACTIVE_LOW",
+    "CONFIG_FIXTURE_DIN3_PULLUP",
+    "CONFIG_FIXTURE_DIN3_PULLDOWN",
     "CONFIG_FIXTURE_ADC_ENABLE",
     "CONFIG_FIXTURE_ADC_UNIT",
     "CONFIG_FIXTURE_ADC_CHANNEL",
@@ -68,6 +90,10 @@ MANIFEST_CONFIG_KEYS = (
     "CONFIG_FIXTURE_ADC_SCALE_NUMERATOR",
     "CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR",
     "CONFIG_FIXTURE_ADC_OFFSET_MV",
+    "CONFIG_FIXTURE_ADC_SERIES_MAX_POINTS",
+    "CONFIG_FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT",
+    "CONFIG_FIXTURE_ADC_SERIES_MAX_INTERVAL_MS",
+    "CONFIG_FIXTURE_ADC_SERIES_MAX_TOTAL_MS",
     "CONFIG_FIXTURE_NET0_LABEL",
     "CONFIG_FIXTURE_NET0_CHANNEL",
     "CONFIG_FIXTURE_NET1_LABEL",
@@ -154,6 +180,56 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def parse_int(value: object) -> int:
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"Not an integer: {value!r}")
+    return int(value.strip(), 0)
+
+
+def safe_bundle_path(bundle_dir: Path, relative_name: object) -> Path:
+    if not isinstance(relative_name, str) or not relative_name:
+        raise RuntimeError(f"Invalid bundle file path in manifest: {relative_name!r}")
+    relative_path = Path(relative_name)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise RuntimeError(f"Unsafe bundle file path in manifest: {relative_name!r}")
+    return bundle_dir / relative_path
+
+
+def factory_app_partition() -> tuple[int, int]:
+    if not PARTITIONS_CSV.exists():
+        raise RuntimeError(f"Missing partition table: {PARTITIONS_CSV}")
+
+    with PARTITIONS_CSV.open(newline="", encoding="utf-8") as handle:
+        rows = csv.reader(line for line in handle if not line.lstrip().startswith("#"))
+        for row in rows:
+            if len(row) < 5:
+                continue
+            name, partition_type, subtype, offset, size = [cell.strip() for cell in row[:5]]
+            if name == "factory" and partition_type == "app" and subtype == "factory":
+                return parse_int(offset), parse_int(size)
+    raise RuntimeError(f"No factory app partition found in {PARTITIONS_CSV}")
+
+
+def parse_flash_args(path: Path) -> dict[str, str]:
+    if not path.exists():
+        raise RuntimeError(f"Missing flash args: {path}")
+
+    flash_files: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("--"):
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            raise RuntimeError(f"Unexpected flash_args line: {raw_line!r}")
+        offset, relative_name = parts
+        parse_int(offset)
+        flash_files[hex(parse_int(offset))] = relative_name
+    return flash_files
 
 
 def read_sdkconfig_values(keys: tuple[str, ...]) -> dict[str, str]:
@@ -275,6 +351,134 @@ def provision(args: argparse.Namespace) -> None:
     run_smoke_test(args)
 
 
+def normalize_flash_map(flash_files: object) -> dict[str, str]:
+    if not isinstance(flash_files, dict) or not flash_files:
+        raise RuntimeError("Flash file map is missing or empty")
+    normalized: dict[str, str] = {}
+    for offset, relative_name in flash_files.items():
+        normalized[hex(parse_int(offset))] = str(relative_name)
+    return normalized
+
+
+def parse_flash_size(value: object) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip().upper()
+    if text.endswith("MB"):
+        return int(text[:-2]) * 1024 * 1024
+    if text.endswith("M"):
+        return int(text[:-1]) * 1024 * 1024
+    try:
+        return parse_int(text)
+    except ValueError:
+        return None
+
+
+def validate_bundle_dir(bundle_dir: Path) -> dict[str, object]:
+    bundle_dir = bundle_dir.resolve()
+    manifest_path = bundle_dir / "manifest.json"
+    flasher_args_path = bundle_dir / "flasher_args.json"
+    flash_args_path = bundle_dir / "flash_args"
+    if not manifest_path.exists():
+        raise RuntimeError(f"Missing manifest: {manifest_path}")
+    if not flasher_args_path.exists():
+        raise RuntimeError(f"Missing flasher args: {flasher_args_path}")
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        flasher_args = json.loads(flasher_args_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid bundle JSON: {exc}") from exc
+
+    if manifest.get("name") != "ai-hardware-esp32-fixture":
+        raise RuntimeError(f"Unexpected bundle name: {manifest.get('name')!r}")
+    if manifest.get("target") != "esp32":
+        raise RuntimeError(f"Unexpected bundle target: {manifest.get('target')!r}")
+
+    manifest_files = manifest.get("files")
+    if not isinstance(manifest_files, list) or not manifest_files:
+        raise RuntimeError("manifest.json has no files list")
+
+    manifest_flash_files: dict[str, str] = {}
+    app_size = None
+    app_path = None
+    app_offset = None
+    for entry in manifest_files:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"Invalid manifest file entry: {entry!r}")
+        offset = hex(parse_int(entry.get("offset")))
+        relative_name = entry.get("path")
+        path = safe_bundle_path(bundle_dir, relative_name)
+        if not path.exists():
+            raise RuntimeError(f"Bundled file is missing: {path}")
+        size = path.stat().st_size
+        if size != parse_int(entry.get("size")):
+            raise RuntimeError(f"Size mismatch for {relative_name}: manifest={entry.get('size')} actual={size}")
+        actual_sha256 = sha256_file(path)
+        if actual_sha256 != entry.get("sha256"):
+            raise RuntimeError(f"SHA-256 mismatch for {relative_name}: manifest={entry.get('sha256')} actual={actual_sha256}")
+        manifest_flash_files[offset] = str(relative_name)
+        if str(relative_name).endswith(".bin") and Path(str(relative_name)).name == BUILD_BIN.name:
+            app_size = size
+            app_path = str(relative_name)
+            app_offset = parse_int(offset)
+
+    flash_args_files = parse_flash_args(flash_args_path)
+    if flash_args_files != manifest_flash_files:
+        raise RuntimeError(f"flash_args does not match manifest files: {flash_args_files!r} != {manifest_flash_files!r}")
+
+    flasher_files = normalize_flash_map(flasher_args.get("flash_files"))
+    if flasher_files != manifest_flash_files:
+        raise RuntimeError(f"flasher_args.json does not match manifest files: {flasher_files!r} != {manifest_flash_files!r}")
+
+    app_section = flasher_args.get("app")
+    if not isinstance(app_section, dict):
+        raise RuntimeError("flasher_args.json has no app section")
+    if app_path != app_section.get("file"):
+        raise RuntimeError(f"App file mismatch: manifest={app_path!r} flasher_args={app_section.get('file')!r}")
+
+    factory_offset, factory_size = factory_app_partition()
+    if app_offset != factory_offset:
+        raise RuntimeError(f"App offset {hex(app_offset or 0)} does not match factory partition {hex(factory_offset)}")
+    if app_size is None:
+        raise RuntimeError("App image entry is missing from manifest")
+    if app_size > factory_size:
+        raise RuntimeError(f"App image is too large: {app_size} > factory partition {factory_size}")
+
+    flash_size = parse_flash_size(manifest.get("flash_settings", {}).get("flash_size"))
+    if flash_size is not None:
+        for offset, relative_name in manifest_flash_files.items():
+            path = safe_bundle_path(bundle_dir, relative_name)
+            end = parse_int(offset) + path.stat().st_size
+            if end > flash_size:
+                raise RuntimeError(f"{relative_name} exceeds configured flash size: end={hex(end)} flash={hex(flash_size)}")
+
+    sdkconfig = manifest.get("sdkconfig")
+    if not isinstance(sdkconfig, dict):
+        raise RuntimeError("manifest.json has no sdkconfig object")
+    if sdkconfig.get("CONFIG_FIXTURE_MCP_ENDPOINT") != manifest.get("mcp", {}).get("default_endpoint"):
+        raise RuntimeError("Manifest MCP endpoint does not match sdkconfig")
+    if sdkconfig.get("CONFIG_FIXTURE_ADC_ENABLE") == "y":
+        for key in (
+            "CONFIG_FIXTURE_ADC_SERIES_MAX_POINTS",
+            "CONFIG_FIXTURE_ADC_SERIES_MAX_SAMPLES_PER_POINT",
+            "CONFIG_FIXTURE_ADC_SERIES_MAX_INTERVAL_MS",
+            "CONFIG_FIXTURE_ADC_SERIES_MAX_TOTAL_MS",
+        ):
+            if key not in sdkconfig:
+                raise RuntimeError(f"Missing ADC series config in manifest: {key}")
+
+    return {
+        "bundle_dir": str(bundle_dir),
+        "file_count": len(manifest_files),
+        "app_path": app_path,
+        "app_size": app_size,
+        "app_offset": hex(app_offset),
+        "factory_size": factory_size,
+        "factory_free": factory_size - app_size,
+    }
+
+
 def bundle(args: argparse.Namespace) -> None:
     if not args.no_build:
         prepare_build_config()
@@ -346,6 +550,12 @@ def bundle(args: argparse.Namespace) -> None:
                 flash_command(args.baud),
                 "```",
                 "",
+                "From the source project, validate this bundle before flashing:",
+                "",
+                "```bash",
+                "python3 tools/deploy.py verify-bundle --bundle dist/esp32-fixture",
+                "```",
+                "",
                 "After flashing, connect to the fixture network and run the MCP smoke test from the source project:",
                 "",
                 "```bash",
@@ -363,10 +573,24 @@ def bundle(args: argparse.Namespace) -> None:
     if args.zip:
         archive_path = shutil.make_archive(str(output_dir), "zip", root_dir=output_dir)
 
+    summary = validate_bundle_dir(output_dir)
     print(f"Bundle written to: {output_dir}")
+    print(
+        "Bundle verified: "
+        f"{summary['file_count']} files, app {summary['app_size']} bytes at {summary['app_offset']}, "
+        f"{summary['factory_free']} bytes free in factory partition"
+    )
     print(f"Flash command: {flash_command(args.baud)}")
     if archive_path:
         print(f"Zip archive: {archive_path}")
+
+
+def verify_bundle(args: argparse.Namespace) -> None:
+    summary = validate_bundle_dir(args.bundle)
+    print(f"OK: flash bundle verified at {summary['bundle_dir']}")
+    print(f"Files: {summary['file_count']}")
+    print(f"App: {summary['app_path']} ({summary['app_size']} bytes at {summary['app_offset']})")
+    print(f"Factory partition free: {summary['factory_free']} bytes")
 
 
 def ports(_: argparse.Namespace) -> None:
@@ -422,7 +646,7 @@ def add_smoke_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--exercise-net-adc-tool",
         action="store_true",
-        help="Call fixture.read_net_adc_raw during smoke test; this changes the MUX selection",
+        help="Call net ADC tools during smoke test; this changes the MUX selection",
     )
 
 
@@ -488,6 +712,15 @@ def main() -> int:
     bundle_parser.add_argument("--zip", action="store_true", help="Also create a .zip archive next to the output directory")
     bundle_parser.set_defaults(func=bundle)
 
+    verify_bundle_parser = subparsers.add_parser("verify-bundle", help="Validate an existing esptool flash bundle")
+    verify_bundle_parser.add_argument(
+        "--bundle",
+        type=Path,
+        default=DEFAULT_BUNDLE_DIR,
+        help=f"Bundle directory to verify, default {DEFAULT_BUNDLE_DIR}",
+    )
+    verify_bundle_parser.set_defaults(func=verify_bundle)
+
     ports_parser = subparsers.add_parser("ports", help="List candidate ESP32 serial ports")
     ports_parser.set_defaults(func=ports)
 
@@ -499,7 +732,7 @@ def main() -> int:
         args.func(args)
     except subprocess.CalledProcessError as exc:
         return exc.returncode
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     return 0

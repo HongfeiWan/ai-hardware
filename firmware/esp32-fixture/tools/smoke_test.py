@@ -18,11 +18,15 @@ CORE_TOOLS = {
     "fixture.select_net",
     "fixture.reset_dut",
     "fixture.set_load_switch",
+    "fixture.read_digital_input",
+    "fixture.scan_digital_inputs",
 }
 
 OPTIONAL_TOOLS = {
     "fixture.read_adc_raw",
     "fixture.read_net_adc_raw",
+    "fixture.scan_net_adc",
+    "fixture.sample_net_adc_series",
 }
 
 
@@ -146,6 +150,76 @@ def require_adc_shape(name: str, payload: dict) -> None:
         )
 
 
+def require_adc_series_shape(name: str, payload: dict) -> None:
+    for field in ("points", "samples_per_point", "interval_ms"):
+        if not isinstance(payload.get(field), int):
+            raise RuntimeError(f"{name} missing integer field {field}: {json.dumps(payload, ensure_ascii=False)}")
+    readings = payload.get("readings")
+    if not isinstance(readings, list):
+        raise RuntimeError(f"{name} missing readings list: {json.dumps(payload, ensure_ascii=False)}")
+    if len(readings) != payload["points"]:
+        raise RuntimeError(
+            f"{name} readings length {len(readings)} does not match points {payload['points']}: "
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+    for index, reading in enumerate(readings):
+        if not isinstance(reading, dict):
+            raise RuntimeError(f"{name} reading {index} is not an object: {reading!r}")
+        if reading.get("index") != index:
+            raise RuntimeError(f"{name} reading index mismatch at {index}: {reading!r}")
+        if not isinstance(reading.get("t_ms"), int):
+            raise RuntimeError(f"{name} reading {index} missing integer t_ms: {reading!r}")
+        require_adc_shape(f"{name}.readings[{index}]", reading)
+
+
+def require_adc_scan_shape(name: str, payload: dict) -> None:
+    for field in ("entry_count", "samples", "settle_ms", "scanned_count"):
+        if not isinstance(payload.get(field), int):
+            raise RuntimeError(f"{name} missing integer field {field}: {json.dumps(payload, ensure_ascii=False)}")
+    readings = payload.get("readings")
+    if not isinstance(readings, list):
+        raise RuntimeError(f"{name} missing readings list: {json.dumps(payload, ensure_ascii=False)}")
+    if len(readings) != payload["scanned_count"]:
+        raise RuntimeError(
+            f"{name} readings length {len(readings)} does not match scanned_count {payload['scanned_count']}: "
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+    if payload["scanned_count"] > payload["entry_count"]:
+        raise RuntimeError(f"{name} scanned_count exceeds entry_count: {json.dumps(payload, ensure_ascii=False)}")
+    for index, reading in enumerate(readings):
+        if not isinstance(reading, dict):
+            raise RuntimeError(f"{name} reading {index} is not an object: {reading!r}")
+        if not isinstance(reading.get("net"), str) or not reading["net"]:
+            raise RuntimeError(f"{name} reading {index} missing net label: {reading!r}")
+        if not isinstance(reading.get("mux_channel"), int):
+            raise RuntimeError(f"{name} reading {index} missing mux_channel: {reading!r}")
+        if not isinstance(reading.get("t_ms"), int):
+            raise RuntimeError(f"{name} reading {index} missing t_ms: {reading!r}")
+        require_adc_shape(f"{name}.readings[{index}]", reading)
+
+
+def require_digital_inputs_shape(name: str, payload: dict) -> None:
+    if not isinstance(payload.get("entry_count"), int):
+        raise RuntimeError(f"{name} missing entry_count: {json.dumps(payload, ensure_ascii=False)}")
+    readings = payload.get("readings")
+    if not isinstance(readings, list):
+        raise RuntimeError(f"{name} missing readings list: {json.dumps(payload, ensure_ascii=False)}")
+    if "scanned_count" in payload and payload["scanned_count"] != len(readings):
+        raise RuntimeError(f"{name} scanned_count mismatch: {json.dumps(payload, ensure_ascii=False)}")
+    for index, reading in enumerate(readings):
+        if not isinstance(reading, dict):
+            raise RuntimeError(f"{name} reading {index} is not an object: {reading!r}")
+        for field in ("label",):
+            if not isinstance(reading.get(field), str) or not reading[field]:
+                raise RuntimeError(f"{name} reading {index} missing {field}: {reading!r}")
+        for field in ("gpio", "raw_level"):
+            if not isinstance(reading.get(field), int):
+                raise RuntimeError(f"{name} reading {index} missing integer {field}: {reading!r}")
+        for field in ("active", "active_low"):
+            if not isinstance(reading.get(field), bool):
+                raise RuntimeError(f"{name} reading {index} missing boolean {field}: {reading!r}")
+
+
 def resource_text_json(result: dict, expected_uri: str) -> dict:
     contents = result.get("contents")
     if not isinstance(contents, list) or not contents:
@@ -185,7 +259,7 @@ def main() -> int:
     parser.add_argument(
         "--exercise-net-adc-tool",
         action="store_true",
-        help="Call fixture.read_net_adc_raw on the first configured net; this changes the MUX selection",
+        help="Call net ADC tools on the first configured net; this changes the MUX selection",
     )
     args = parser.parse_args()
 
@@ -227,8 +301,35 @@ def main() -> int:
         require_ok("fixture://net-map", net_map)
         if net_map.get("entry_count", 0) < 1:
             raise RuntimeError("fixture://net-map has no enabled net entries")
+        digital_inputs_result = client.request("resources/read", {"uri": "fixture://digital-inputs"})
+        digital_inputs = resource_text_json(digital_inputs_result, "fixture://digital-inputs")
+        require_ok("fixture://digital-inputs", digital_inputs)
+        digital_scan_result = tool_text_json(
+            client.request("tools/call", {"name": "fixture.scan_digital_inputs", "arguments": {}})
+        )
+        require_ok("fixture.scan_digital_inputs", digital_scan_result)
+        require_digital_inputs_shape("fixture.scan_digital_inputs", digital_scan_result)
+        digital_read_result = None
+        digital_entries = digital_inputs.get("entries")
+        if isinstance(digital_entries, list) and digital_entries:
+            first_digital_label = digital_entries[0].get("label")
+            if not isinstance(first_digital_label, str) or not first_digital_label:
+                raise RuntimeError(f"First digital input entry has no usable label: {digital_entries[0]!r}")
+            digital_read_result = tool_text_json(
+                client.request(
+                    "tools/call",
+                    {"name": "fixture.read_digital_input", "arguments": {"label": first_digital_label}},
+                )
+            )
+            require_ok("fixture.read_digital_input", digital_read_result)
+            require_digital_inputs_shape(
+                "fixture.read_digital_input",
+                {"entry_count": 1, "readings": [digital_read_result], "scanned_count": 1},
+            )
         adc_result = None
         net_adc_result = None
+        net_adc_scan_result = None
+        net_adc_series_result = None
         if not args.skip_adc_tool:
             adc_result = tool_text_json(
                 client.request("tools/call", {"name": "fixture.read_adc_raw", "arguments": {"samples": 1}})
@@ -253,6 +354,34 @@ def main() -> int:
                 )
                 require_ok("fixture.read_net_adc_raw", net_adc_result)
                 require_adc_shape("fixture.read_net_adc_raw", net_adc_result)
+                net_adc_scan_result = tool_text_json(
+                    client.request(
+                        "tools/call",
+                        {
+                            "name": "fixture.scan_net_adc",
+                            "arguments": {"samples": 1, "settle_ms": 1},
+                        },
+                    )
+                )
+                require_ok("fixture.scan_net_adc", net_adc_scan_result)
+                require_adc_scan_shape("fixture.scan_net_adc", net_adc_scan_result)
+                net_adc_series_result = tool_text_json(
+                    client.request(
+                        "tools/call",
+                        {
+                            "name": "fixture.sample_net_adc_series",
+                            "arguments": {
+                                "net": first_net,
+                                "points": 2,
+                                "samples_per_point": 1,
+                                "interval_ms": 1,
+                                "settle_ms": 1,
+                            },
+                        },
+                    )
+                )
+                require_ok("fixture.sample_net_adc_series", net_adc_series_result)
+                require_adc_series_shape("fixture.sample_net_adc_series", net_adc_series_result)
         elif args.exercise_net_adc_tool:
             raise RuntimeError("--exercise-net-adc-tool cannot be used with --skip-adc-tool")
 
@@ -272,10 +401,18 @@ def main() -> int:
     print(f"Fixture self test: {json.dumps(fixture_self_test, ensure_ascii=False)}")
     print(f"Status resource: {json.dumps(resource_status, ensure_ascii=False)}")
     print(f"Net map resource: {json.dumps(net_map, ensure_ascii=False)}")
+    print(f"Digital inputs resource: {json.dumps(digital_inputs, ensure_ascii=False)}")
+    print(f"Digital input scan: {json.dumps(digital_scan_result, ensure_ascii=False)}")
+    if digital_read_result is not None:
+        print(f"Digital input read: {json.dumps(digital_read_result, ensure_ascii=False)}")
     if adc_result is not None:
         print(f"ADC read: {json.dumps(adc_result, ensure_ascii=False)}")
     if net_adc_result is not None:
         print(f"Net ADC read: {json.dumps(net_adc_result, ensure_ascii=False)}")
+    if net_adc_scan_result is not None:
+        print(f"Net ADC scan: {json.dumps(net_adc_scan_result, ensure_ascii=False)}")
+    if net_adc_series_result is not None:
+        print(f"Net ADC series: {json.dumps(net_adc_series_result, ensure_ascii=False)}")
     return 0
 
 
