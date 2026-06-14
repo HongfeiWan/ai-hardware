@@ -52,7 +52,7 @@ directly.
 
 Verified locally with ESP-IDF v5.4.4 on ESP32 target. The project uses the
 included `partitions.csv` for 4 MB ESP32 modules, giving the factory app a 3 MB
-partition. The current app image is about 0xe7500 bytes, leaving about 70% free
+partition. The current app image is about 0xe7890 bytes, leaving about 70% free
 in that app partition.
 
 To flash:
@@ -128,8 +128,9 @@ the firmware.
 Digital inputs are disabled by default because real fixture wiring varies. Set
 `FIXTURE_DIN*_GPIO` to a valid GPIO and rename `FIXTURE_DIN*_LABEL` to board
 signals such as `PGOOD`, `FAULT`, `IRQ` or `BOOT_MODE`. `fixture.self_test`
-fails closed if a digital input uses an invalid GPIO, reuses an output GPIO, or
-enables pull-up and pull-down at the same time.
+fails closed if a digital input uses an invalid GPIO, reuses an output or ADC
+GPIO, duplicates another digital input GPIO or label, or enables pull-up and
+pull-down at the same time.
 
 When ADC calibration is available, ADC tools return both raw fields and
 millivolt fields:

@@ -444,7 +444,52 @@ static bool digital_input_entry_is_valid(const fixture_digital_input_entry_t *en
     return digital_input_entry_is_enabled(entry) &&
            input_gpio_config_is_ok(entry->gpio) &&
            !gpio_conflicts_with_fixture_output(entry->gpio) &&
+           !gpio_conflicts_with_adc(entry->gpio) &&
            !(entry->pullup && entry->pulldown);
+}
+
+static bool digital_input_gpio_is_duplicate(size_t index)
+{
+    if (index >= sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]) ||
+        !digital_input_entry_is_enabled(&s_digital_inputs[index])) {
+        return false;
+    }
+
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (i != index &&
+            digital_input_entry_is_enabled(&s_digital_inputs[i]) &&
+            s_digital_inputs[i].gpio == s_digital_inputs[index].gpio) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool digital_input_label_is_duplicate(size_t index)
+{
+    if (index >= sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]) ||
+        !digital_input_entry_is_enabled(&s_digital_inputs[index])) {
+        return false;
+    }
+
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (i != index &&
+            digital_input_entry_is_enabled(&s_digital_inputs[i]) &&
+            strcmp(s_digital_inputs[i].label, s_digital_inputs[index].label) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool digital_input_entry_at_index_is_valid(size_t index)
+{
+    if (index >= sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0])) {
+        return false;
+    }
+    return digital_input_entry_is_valid(&s_digital_inputs[index]) &&
+           !digital_input_gpio_is_duplicate(index) &&
+           !digital_input_label_is_duplicate(index);
 }
 
 static int count_enabled_digital_inputs(void)
@@ -463,7 +508,41 @@ static int count_invalid_digital_inputs(void)
     int count = 0;
     for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
         if (digital_input_entry_is_enabled(&s_digital_inputs[i]) &&
-            !digital_input_entry_is_valid(&s_digital_inputs[i])) {
+            !digital_input_entry_at_index_is_valid(i)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_adc_conflicting_digital_inputs(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (digital_input_entry_is_enabled(&s_digital_inputs[i]) &&
+            gpio_conflicts_with_adc(s_digital_inputs[i].gpio)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_duplicate_digital_input_gpios(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (digital_input_gpio_is_duplicate(i)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_duplicate_digital_input_labels(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
+        if (digital_input_label_is_duplicate(i)) {
             count++;
         }
     }
@@ -513,12 +592,16 @@ static void configure_output_gpio(int gpio, int initial_level)
     ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)gpio, initial_level));
 }
 
-static void configure_input_gpio(const fixture_digital_input_entry_t *entry)
+static void configure_input_gpio(size_t index)
 {
+    if (index >= sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0])) {
+        return;
+    }
+    const fixture_digital_input_entry_t *entry = &s_digital_inputs[index];
     if (!digital_input_entry_is_enabled(entry)) {
         return;
     }
-    if (!digital_input_entry_is_valid(entry)) {
+    if (!digital_input_entry_at_index_is_valid(index)) {
         ESP_LOGW(TAG, "Digital input %s on GPIO%d is not valid; skipping it", entry->label, entry->gpio);
         return;
     }
@@ -750,12 +833,20 @@ static void append_digital_inputs_json(char *buf, size_t len)
                      "\"active_low\":%s,"
                      "\"pullup\":%s,"
                      "\"pulldown\":%s,"
+                     "\"conflicts_with_output\":%s,"
+                     "\"conflicts_with_adc\":%s,"
+                     "\"duplicate_gpio\":%s,"
+                     "\"duplicate_label\":%s,"
                      "\"valid\":%s}",
                      entry->gpio,
                      entry->active_low ? "true" : "false",
                      entry->pullup ? "true" : "false",
                      entry->pulldown ? "true" : "false",
-                     digital_input_entry_is_valid(entry) ? "true" : "false");
+                     gpio_conflicts_with_fixture_output(entry->gpio) ? "true" : "false",
+                     gpio_conflicts_with_adc(entry->gpio) ? "true" : "false",
+                     digital_input_gpio_is_duplicate(i) ? "true" : "false",
+                     digital_input_label_is_duplicate(i) ? "true" : "false",
+                     digital_input_entry_at_index_is_valid(i) ? "true" : "false");
     }
 
     json_appendf(buf, len, &offset, "]}");
@@ -793,6 +884,9 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
     const int digital_input_count = count_enabled_digital_inputs();
     const int invalid_digital_inputs = count_invalid_digital_inputs();
     const int boot_strapping_digital_inputs = count_boot_strapping_digital_inputs();
+    const int adc_conflicting_digital_inputs = count_adc_conflicting_digital_inputs();
+    const int duplicate_digital_input_gpios = count_duplicate_digital_input_gpios();
+    const int duplicate_digital_input_labels = count_duplicate_digital_input_labels();
 #if CONFIG_FIXTURE_ADC_ENABLE
     const bool adc_ok = s_adc_ready;
     const bool adc_scale_ok = CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR > 0;
@@ -814,7 +908,7 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
                     adc_scale_ok &&
                     adc_series_limits_ok;
 
-    char payload[2048];
+    char payload[2560];
     snprintf(payload, sizeof(payload),
              "{\"ok\":%s,"
              "\"invalid_output_gpio_count\":%d,"
@@ -834,6 +928,9 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              "\"net_map_ok\":%s,"
              "\"digital_input_count\":%d,"
              "\"invalid_digital_input_count\":%d,"
+             "\"adc_conflicting_digital_input_count\":%d,"
+             "\"duplicate_digital_input_gpio_count\":%d,"
+             "\"duplicate_digital_input_label_count\":%d,"
              "\"digital_inputs_ok\":%s,"
              "\"free_heap_bytes\":%u,"
              "\"minimum_free_heap_bytes\":%u,"
@@ -876,6 +973,9 @@ static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *propert
              invalid_net_map_entries == 0 ? "true" : "false",
              digital_input_count,
              invalid_digital_inputs,
+             adc_conflicting_digital_inputs,
+             duplicate_digital_input_gpios,
+             duplicate_digital_input_labels,
              invalid_digital_inputs == 0 ? "true" : "false",
              (unsigned int)esp_get_free_heap_size(),
              (unsigned int)esp_get_minimum_free_heap_size(),
@@ -1057,7 +1157,8 @@ static esp_mcp_value_t read_digital_input_callback(const esp_mcp_property_list_t
         json_appendf(payload, sizeof(payload), &offset, "}");
         return json_value(payload);
     }
-    if (!digital_input_entry_is_valid(entry)) {
+    const size_t index = (size_t)(entry - s_digital_inputs);
+    if (!digital_input_entry_at_index_is_valid(index)) {
         char payload[256];
         size_t offset = 0;
         json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"invalid_digital_input\",\"label\":");
@@ -2042,7 +2143,7 @@ static void init_fixture_io(void)
     for (size_t i = 0; i < sizeof(s_digital_inputs) / sizeof(s_digital_inputs[0]); i++) {
         if (digital_input_entry_is_enabled(&s_digital_inputs[i])) {
             warn_if_boot_strapping_gpio(s_digital_inputs[i].label, s_digital_inputs[i].gpio);
-            configure_input_gpio(&s_digital_inputs[i]);
+            configure_input_gpio(i);
         }
     }
 }

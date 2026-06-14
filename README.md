@@ -92,7 +92,7 @@ python3 tools/deploy.py verify-bundle
 python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --smoke --prompt
 ```
 
-固件使用 4MB ESP32 分区表，factory app 分区为 3MB；构建已用 ESP-IDF v5.4.4 在 ESP32 target 上验证通过，当前 app 约 `0xe7500` 字节，app 分区剩余约 70%。`bundle` 会生成包含 bootloader、partition table、app、`flash_args`、`manifest.json` 和 SHA-256 的烧录包；`verify-bundle` 会交叉检查 manifest、哈希、flash args 和 app 分区尺寸。烧录后连接默认 SoftAP，再运行：
+固件使用 4MB ESP32 分区表，factory app 分区为 3MB；构建已用 ESP-IDF v5.4.4 在 ESP32 target 上验证通过，当前 app 约 `0xe7890` 字节，app 分区剩余约 70%。`bundle` 会生成包含 bootloader、partition table、app、`flash_args`、`manifest.json` 和 SHA-256 的烧录包；`verify-bundle` 会交叉检查 manifest、哈希、flash args 和 app 分区尺寸。烧录后连接默认 SoftAP，再运行：
 
 ```bash
 python3 tools/deploy.py smoke
