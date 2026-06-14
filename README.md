@@ -60,10 +60,44 @@ flowchart LR
 │   │   └── usb_power_stage.yaml
 │   └── sessions/
 │       └── usb_power_stage_session.json
+├── firmware/
+│   └── esp32-fixture/
+│       ├── CMakeLists.txt
+│       ├── partitions.csv
+│       ├── README.md
+│       ├── sdkconfig.defaults
+│       ├── main/
+│       │   ├── app_main.c
+│       │   ├── CMakeLists.txt
+│       │   ├── idf_component.yml
+│       │   └── Kconfig.projbuild
+│       └── tools/
+│           ├── deploy.py
+│           └── smoke_test.py
 └── schemas/
     ├── board_context.schema.json
     └── diagnostic_session.schema.json
 ```
+
+## ESP32 固件
+
+ESP32 侧最小可部署工程在 [firmware/esp32-fixture](firmware/esp32-fixture)。它基于 ESP-IDF 5.4+ 和 Espressif `mcp-c-sdk`，默认启动 SoftAP，并在 `http://192.168.4.1/mcp` 暴露 MCP HTTP endpoint。
+
+```bash
+cd firmware/esp32-fixture
+python3 tools/deploy.py doctor
+python3 tools/deploy.py build
+python3 tools/deploy.py bundle --zip
+python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --smoke --prompt
+```
+
+固件使用 4MB ESP32 分区表，factory app 分区为 3MB；构建已用 ESP-IDF v5.4.4 在 ESP32 target 上验证通过，当前 app 约 `0xe5020` 字节，app 分区剩余约 70%。`bundle` 会生成包含 bootloader、partition table、app、`flash_args`、`manifest.json` 和 SHA-256 的烧录包。烧录后连接默认 SoftAP，再运行：
+
+```bash
+python3 tools/deploy.py smoke
+```
+
+第一版工具包括 `fixture.ping`、`fixture.get_status`、`fixture.self_test`、`fixture.set_mux_channel`、`fixture.select_net`、`fixture.reset_dut`、`fixture.set_load_switch`、`fixture.read_adc_raw` 和 `fixture.read_net_adc_raw`。资源包括 `fixture://status` 和 `fixture://net-map`。ADC 工具会返回 raw 采样值，并在校准可用时返回 ADC 引脚毫伏值和按夹具比例换算后的 `scaled_mv_*`。`fixture.self_test` 会检查输出 GPIO、MUX 通道可表示性、网标/测试点映射、ADC 初始化和 heap 状态。真实接板前请先用 `idf.py menuconfig` 检查 GPIO 映射、网标映射、MUX 稳定等待时间、ADC 校准/缩放和动作极性。
 
 ## 核心 MCP 表面
 

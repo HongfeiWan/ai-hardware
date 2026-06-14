@@ -1,0 +1,272 @@
+menu "AI Hardware Fixture"
+
+    choice FIXTURE_WIFI_MODE
+        prompt "Wi-Fi mode"
+        default FIXTURE_WIFI_MODE_AP
+        help
+            SoftAP is the most direct bring-up path: connect your laptop to the
+            ESP32 network and call the MCP endpoint at http://192.168.4.1/mcp.
+
+        config FIXTURE_WIFI_MODE_AP
+            bool "SoftAP"
+
+        config FIXTURE_WIFI_MODE_STA
+            bool "Station"
+    endchoice
+
+    config FIXTURE_WIFI_AP_SSID_PREFIX
+        string "SoftAP SSID prefix"
+        depends on FIXTURE_WIFI_MODE_AP
+        default "ai-hardware-fixture"
+
+    config FIXTURE_WIFI_AP_PASSWORD
+        string "SoftAP password"
+        depends on FIXTURE_WIFI_MODE_AP
+        default "aihardware"
+        help
+            Use an empty string for an open AP. WPA/WPA2 passwords must be at least 8 characters.
+
+    config FIXTURE_WIFI_AP_CHANNEL
+        int "SoftAP channel"
+        depends on FIXTURE_WIFI_MODE_AP
+        range 1 13
+        default 6
+
+    config FIXTURE_WIFI_AP_MAX_CONN
+        int "SoftAP max stations"
+        depends on FIXTURE_WIFI_MODE_AP
+        range 1 8
+        default 4
+
+    config FIXTURE_WIFI_STA_SSID
+        string "Station SSID"
+        depends on FIXTURE_WIFI_MODE_STA
+        default ""
+
+    config FIXTURE_WIFI_STA_PASSWORD
+        string "Station password"
+        depends on FIXTURE_WIFI_MODE_STA
+        default ""
+
+    config FIXTURE_WIFI_STA_MAX_RETRY
+        int "Station max retry"
+        depends on FIXTURE_WIFI_MODE_STA
+        range 1 20
+        default 8
+
+    config FIXTURE_MCP_PORT
+        int "MCP HTTP port"
+        range 1 65535
+        default 80
+
+    config FIXTURE_MCP_ENDPOINT
+        string "MCP endpoint name"
+        default "mcp"
+        help
+            The HTTP path is /<endpoint>, for example /mcp.
+
+    config FIXTURE_RESET_GPIO
+        int "DUT reset GPIO"
+        range -1 48
+        default 25
+        help
+            Set to -1 to disable fixture.reset_dut.
+            Avoid ESP32 strapping pins GPIO0, GPIO2, GPIO4, GPIO5, GPIO12 and
+            GPIO15 for fixture outputs unless your board design controls their
+            boot levels.
+
+    config FIXTURE_RESET_ACTIVE_LOW
+        bool "DUT reset is active-low"
+        default y
+
+    config FIXTURE_MAX_RESET_PULSE_MS
+        int "Maximum reset pulse duration in ms"
+        range 10 5000
+        default 1000
+
+    config FIXTURE_LOAD_SWITCH_GPIO
+        int "Load switch GPIO"
+        range -1 48
+        default 26
+        help
+            Set to -1 to disable fixture.set_load_switch.
+            Avoid ESP32 strapping pins GPIO0, GPIO2, GPIO4, GPIO5, GPIO12 and
+            GPIO15 for fixture outputs unless your board design controls their
+            boot levels.
+
+    config FIXTURE_LOAD_SWITCH_ACTIVE_HIGH
+        bool "Load switch enabled level is high"
+        default y
+
+    config FIXTURE_MUX_SEL0_GPIO
+        int "MUX select bit 0 GPIO"
+        range -1 48
+        default 27
+
+    config FIXTURE_MUX_SEL1_GPIO
+        int "MUX select bit 1 GPIO"
+        range -1 48
+        default 32
+
+    config FIXTURE_MUX_SEL2_GPIO
+        int "MUX select bit 2 GPIO"
+        range -1 48
+        default 33
+
+    config FIXTURE_MUX_MAX_CHANNEL
+        int "Maximum allowed MUX channel"
+        range 0 7
+        default 7
+
+    config FIXTURE_MUX_SETTLE_MS
+        int "Default MUX settle delay in ms"
+        range 0 1000
+        default 10
+        help
+            Delay after changing the MUX before reading ADC samples.
+
+    config FIXTURE_MAX_MUX_SETTLE_MS
+        int "Maximum tool-requested MUX settle delay in ms"
+        range 0 5000
+        default 250
+        help
+            Upper bound for MCP-requested settle delays.
+
+    menu "Fixture net/testpoint map"
+
+        config FIXTURE_NET0_LABEL
+            string "Net label for MUX channel 0"
+            default "TP0"
+
+        config FIXTURE_NET0_CHANNEL
+            int "MUX channel for net 0"
+            range 0 7
+            default 0
+
+        config FIXTURE_NET1_LABEL
+            string "Net label for MUX channel 1"
+            default "TP1"
+
+        config FIXTURE_NET1_CHANNEL
+            int "MUX channel for net 1"
+            range 0 7
+            default 1
+
+        config FIXTURE_NET2_LABEL
+            string "Net label for MUX channel 2"
+            default "TP2"
+
+        config FIXTURE_NET2_CHANNEL
+            int "MUX channel for net 2"
+            range 0 7
+            default 2
+
+        config FIXTURE_NET3_LABEL
+            string "Net label for MUX channel 3"
+            default "TP3"
+
+        config FIXTURE_NET3_CHANNEL
+            int "MUX channel for net 3"
+            range 0 7
+            default 3
+
+        config FIXTURE_NET4_LABEL
+            string "Net label for MUX channel 4"
+            default "TP4"
+
+        config FIXTURE_NET4_CHANNEL
+            int "MUX channel for net 4"
+            range 0 7
+            default 4
+
+        config FIXTURE_NET5_LABEL
+            string "Net label for MUX channel 5"
+            default "TP5"
+
+        config FIXTURE_NET5_CHANNEL
+            int "MUX channel for net 5"
+            range 0 7
+            default 5
+
+        config FIXTURE_NET6_LABEL
+            string "Net label for MUX channel 6"
+            default "TP6"
+
+        config FIXTURE_NET6_CHANNEL
+            int "MUX channel for net 6"
+            range 0 7
+            default 6
+
+        config FIXTURE_NET7_LABEL
+            string "Net label for MUX channel 7"
+            default "TP7"
+
+        config FIXTURE_NET7_CHANNEL
+            int "MUX channel for net 7"
+            range 0 7
+            default 7
+
+    endmenu
+
+    config FIXTURE_ADC_ENABLE
+        bool "Enable fixture.read_adc_raw"
+        default y
+
+    config FIXTURE_ADC_UNIT
+        int "ADC unit"
+        depends on FIXTURE_ADC_ENABLE
+        range 1 2
+        default 1
+        help
+            Use ADC1 for the default Wi-Fi SoftAP mode. On classic ESP32, ADC2
+            cannot be used reliably while Wi-Fi is active.
+
+    config FIXTURE_ADC_CHANNEL
+        int "ADC channel"
+        depends on FIXTURE_ADC_ENABLE
+        range 0 9
+        default 0
+        help
+            On classic ESP32, ADC1 supports channels 0-7 and ADC2 supports
+            channels 0-9. ADC1 channel 0 is GPIO36.
+
+    config FIXTURE_ADC_CALIBRATION_ENABLE
+        bool "Enable ADC millivolt calibration"
+        depends on FIXTURE_ADC_ENABLE
+        default y
+        help
+            When supported by the target and eFuse/default Vref settings, ADC
+            tools also return calibrated millivolt fields. Raw ADC values are
+            still returned if calibration is unavailable.
+
+    config FIXTURE_ADC_DEFAULT_VREF_MV
+        int "Default ADC Vref in mV"
+        depends on FIXTURE_ADC_CALIBRATION_ENABLE
+        range 1000 1200
+        default 1100
+        help
+            Used by the ESP32 line-fitting calibration scheme when eFuse
+            calibration values are unavailable.
+
+    config FIXTURE_ADC_SCALE_NUMERATOR
+        int "Measured-voltage scale numerator"
+        depends on FIXTURE_ADC_ENABLE
+        range 1 100000
+        default 1
+        help
+            Scales calibrated ADC pin millivolts into fixture/net millivolts:
+            scaled_mv = mv * numerator / denominator + offset.
+
+    config FIXTURE_ADC_SCALE_DENOMINATOR
+        int "Measured-voltage scale denominator"
+        depends on FIXTURE_ADC_ENABLE
+        range 1 100000
+        default 1
+
+    config FIXTURE_ADC_OFFSET_MV
+        int "Measured-voltage offset in mV"
+        depends on FIXTURE_ADC_ENABLE
+        range -100000 100000
+        default 0
+
+endmenu

@@ -1,0 +1,1549 @@
+/*
+ * AI Hardware ESP32 Fixture MCP server.
+ *
+ * This firmware exposes a small allowlisted MCP surface for fixture-side
+ * actions: MUX selection, DUT reset, load switch control, ADC raw reads and
+ * fixture status. The Python bench MCP server should remain responsible for
+ * instrument control, model calls and high-risk decision making.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "driver/gpio.h"
+#include "esp_check.h"
+#include "esp_err.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+#include "nvs_flash.h"
+
+#if CONFIG_FIXTURE_ADC_ENABLE
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
+#endif
+
+#include "esp_http_server.h"
+#include "esp_mcp_data.h"
+#include "esp_mcp_engine.h"
+#include "esp_mcp_mgr.h"
+#include "esp_mcp_property.h"
+#include "esp_mcp_resource.h"
+#include "esp_mcp_tool.h"
+
+static const char *TAG = "ai_fixture";
+
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
+
+static char s_ip_addr[16] = "0.0.0.0";
+static int s_mux_channel = 0;
+static bool s_load_switch_enabled;
+static char s_selected_net_label[64] = "";
+
+typedef struct {
+    const char *label;
+    int channel;
+} fixture_net_entry_t;
+
+static const fixture_net_entry_t s_net_map[] = {
+    {CONFIG_FIXTURE_NET0_LABEL, CONFIG_FIXTURE_NET0_CHANNEL},
+    {CONFIG_FIXTURE_NET1_LABEL, CONFIG_FIXTURE_NET1_CHANNEL},
+    {CONFIG_FIXTURE_NET2_LABEL, CONFIG_FIXTURE_NET2_CHANNEL},
+    {CONFIG_FIXTURE_NET3_LABEL, CONFIG_FIXTURE_NET3_CHANNEL},
+    {CONFIG_FIXTURE_NET4_LABEL, CONFIG_FIXTURE_NET4_CHANNEL},
+    {CONFIG_FIXTURE_NET5_LABEL, CONFIG_FIXTURE_NET5_CHANNEL},
+    {CONFIG_FIXTURE_NET6_LABEL, CONFIG_FIXTURE_NET6_CHANNEL},
+    {CONFIG_FIXTURE_NET7_LABEL, CONFIG_FIXTURE_NET7_CHANNEL},
+};
+
+#if CONFIG_FIXTURE_WIFI_MODE_STA
+static EventGroupHandle_t s_wifi_event_group;
+static int s_sta_retry_count;
+#endif
+
+#if CONFIG_FIXTURE_ADC_ENABLE
+static adc_oneshot_unit_handle_t s_adc_handle;
+static adc_cali_handle_t s_adc_cali_handle;
+static bool s_adc_ready;
+static bool s_adc_cali_ready;
+static char s_adc_error[64] = "not_initialized";
+static char s_adc_cali_error[64] = "not_initialized";
+#endif
+
+static bool gpio_is_enabled(int gpio)
+{
+    return gpio >= 0;
+}
+
+static bool output_gpio_is_usable(int gpio)
+{
+    if (!gpio_is_enabled(gpio)) {
+        return false;
+    }
+    if (!GPIO_IS_VALID_OUTPUT_GPIO((gpio_num_t)gpio)) {
+        ESP_LOGW(TAG, "GPIO%d is not a valid output on this target; skipping it", gpio);
+        return false;
+    }
+    return true;
+}
+
+static bool output_gpio_config_is_ok(int gpio)
+{
+    return !gpio_is_enabled(gpio) || GPIO_IS_VALID_OUTPUT_GPIO((gpio_num_t)gpio);
+}
+
+static bool gpio_is_boot_strapping_pin(int gpio)
+{
+    switch (gpio) {
+    case 0:
+    case 2:
+    case 4:
+    case 5:
+    case 12:
+    case 15:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void warn_if_boot_strapping_gpio(const char *name, int gpio)
+{
+    if (gpio_is_enabled(gpio) && gpio_is_boot_strapping_pin(gpio)) {
+        ESP_LOGW(TAG,
+                 "%s uses GPIO%d, an ESP32 boot strapping pin. Ensure the fixture does not force an unsafe boot level.",
+                 name,
+                 gpio);
+    }
+}
+
+static bool json_appendf(char *buf, size_t len, size_t *offset, const char *fmt, ...)
+{
+    if (*offset >= len) {
+        return false;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    const int written = vsnprintf(buf + *offset, len - *offset, fmt, args);
+    va_end(args);
+    if (written < 0) {
+        return false;
+    }
+    if ((size_t)written >= len - *offset) {
+        *offset = len - 1;
+        return false;
+    }
+    *offset += (size_t)written;
+    return true;
+}
+
+static bool json_append_escaped_string(char *buf, size_t len, size_t *offset, const char *text)
+{
+    if (!json_appendf(buf, len, offset, "\"")) {
+        return false;
+    }
+
+    for (const unsigned char *cursor = (const unsigned char *)text; cursor && *cursor; cursor++) {
+        switch (*cursor) {
+        case '"':
+            if (!json_appendf(buf, len, offset, "\\\"")) {
+                return false;
+            }
+            break;
+        case '\\':
+            if (!json_appendf(buf, len, offset, "\\\\")) {
+                return false;
+            }
+            break;
+        case '\b':
+            if (!json_appendf(buf, len, offset, "\\b")) {
+                return false;
+            }
+            break;
+        case '\f':
+            if (!json_appendf(buf, len, offset, "\\f")) {
+                return false;
+            }
+            break;
+        case '\n':
+            if (!json_appendf(buf, len, offset, "\\n")) {
+                return false;
+            }
+            break;
+        case '\r':
+            if (!json_appendf(buf, len, offset, "\\r")) {
+                return false;
+            }
+            break;
+        case '\t':
+            if (!json_appendf(buf, len, offset, "\\t")) {
+                return false;
+            }
+            break;
+        default:
+            if (*cursor < 0x20) {
+                if (!json_appendf(buf, len, offset, "\\u%04x", *cursor)) {
+                    return false;
+                }
+            } else if (!json_appendf(buf, len, offset, "%c", *cursor)) {
+                return false;
+            }
+            break;
+        }
+    }
+
+    return json_appendf(buf, len, offset, "\"");
+}
+
+static int count_boot_strapping_gpios(void)
+{
+    const int gpios[] = {
+        CONFIG_FIXTURE_RESET_GPIO,
+        CONFIG_FIXTURE_LOAD_SWITCH_GPIO,
+        CONFIG_FIXTURE_MUX_SEL0_GPIO,
+        CONFIG_FIXTURE_MUX_SEL1_GPIO,
+        CONFIG_FIXTURE_MUX_SEL2_GPIO,
+    };
+    int count = 0;
+    for (size_t i = 0; i < sizeof(gpios) / sizeof(gpios[0]); i++) {
+        if (gpio_is_enabled(gpios[i]) && gpio_is_boot_strapping_pin(gpios[i])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_invalid_output_gpios(void)
+{
+    const int gpios[] = {
+        CONFIG_FIXTURE_RESET_GPIO,
+        CONFIG_FIXTURE_LOAD_SWITCH_GPIO,
+        CONFIG_FIXTURE_MUX_SEL0_GPIO,
+        CONFIG_FIXTURE_MUX_SEL1_GPIO,
+        CONFIG_FIXTURE_MUX_SEL2_GPIO,
+    };
+    int count = 0;
+    for (size_t i = 0; i < sizeof(gpios) / sizeof(gpios[0]); i++) {
+        if (!output_gpio_config_is_ok(gpios[i])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int mux_required_select_bits(void)
+{
+    int max_channel = CONFIG_FIXTURE_MUX_MAX_CHANNEL;
+    int bits = 0;
+    while (max_channel > 0) {
+        bits++;
+        max_channel >>= 1;
+    }
+    return bits;
+}
+
+static bool mux_config_supports_max_channel(void)
+{
+    const int mux_gpios[] = {
+        CONFIG_FIXTURE_MUX_SEL0_GPIO,
+        CONFIG_FIXTURE_MUX_SEL1_GPIO,
+        CONFIG_FIXTURE_MUX_SEL2_GPIO,
+    };
+    const int required_bits = mux_required_select_bits();
+    if (required_bits > (int)(sizeof(mux_gpios) / sizeof(mux_gpios[0]))) {
+        return false;
+    }
+    for (int bit = 0; bit < required_bits; bit++) {
+        if (!gpio_is_enabled(mux_gpios[bit]) || !output_gpio_config_is_ok(mux_gpios[bit])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool mux_channel_can_be_selected(int channel)
+{
+    const int mux_gpios[] = {
+        CONFIG_FIXTURE_MUX_SEL0_GPIO,
+        CONFIG_FIXTURE_MUX_SEL1_GPIO,
+        CONFIG_FIXTURE_MUX_SEL2_GPIO,
+    };
+    for (size_t bit = 0; bit < sizeof(mux_gpios) / sizeof(mux_gpios[0]); bit++) {
+        if (((channel >> bit) & 0x1) &&
+            (!gpio_is_enabled(mux_gpios[bit]) || !output_gpio_config_is_ok(mux_gpios[bit]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool net_label_is_enabled(const char *label)
+{
+    return label && label[0] != '\0';
+}
+
+static bool net_entry_is_selectable(const fixture_net_entry_t *entry)
+{
+    return net_label_is_enabled(entry->label) &&
+           entry->channel >= 0 &&
+           entry->channel <= CONFIG_FIXTURE_MUX_MAX_CHANNEL &&
+           mux_channel_can_be_selected(entry->channel);
+}
+
+static int count_enabled_net_entries(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
+        if (net_label_is_enabled(s_net_map[i].label)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_invalid_net_entries(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
+        if (net_label_is_enabled(s_net_map[i].label) && !net_entry_is_selectable(&s_net_map[i])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static const fixture_net_entry_t *find_net_entry(const char *label)
+{
+    if (!net_label_is_enabled(label)) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
+        if (net_label_is_enabled(s_net_map[i].label) && strcmp(s_net_map[i].label, label) == 0) {
+            return &s_net_map[i];
+        }
+    }
+    return NULL;
+}
+
+static void configure_output_gpio(int gpio, int initial_level)
+{
+    if (!output_gpio_is_usable(gpio)) {
+        return;
+    }
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << gpio,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)gpio, initial_level));
+}
+
+static void set_reset_inactive(void)
+{
+    if (!output_gpio_is_usable(CONFIG_FIXTURE_RESET_GPIO)) {
+        return;
+    }
+    const int inactive_level = CONFIG_FIXTURE_RESET_ACTIVE_LOW ? 1 : 0;
+    ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)CONFIG_FIXTURE_RESET_GPIO, inactive_level));
+}
+
+static void set_reset_active(void)
+{
+    if (!output_gpio_is_usable(CONFIG_FIXTURE_RESET_GPIO)) {
+        return;
+    }
+    const int active_level = CONFIG_FIXTURE_RESET_ACTIVE_LOW ? 0 : 1;
+    ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)CONFIG_FIXTURE_RESET_GPIO, active_level));
+}
+
+static void set_load_switch(bool enabled)
+{
+    if (!output_gpio_is_usable(CONFIG_FIXTURE_LOAD_SWITCH_GPIO)) {
+        s_load_switch_enabled = false;
+        return;
+    }
+
+    const bool active_high = CONFIG_FIXTURE_LOAD_SWITCH_ACTIVE_HIGH;
+    const int level = enabled ? (active_high ? 1 : 0) : (active_high ? 0 : 1);
+    ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)CONFIG_FIXTURE_LOAD_SWITCH_GPIO, level));
+    s_load_switch_enabled = enabled;
+}
+
+static void set_mux_channel(int channel)
+{
+    const int mux_gpios[] = {
+        CONFIG_FIXTURE_MUX_SEL0_GPIO,
+        CONFIG_FIXTURE_MUX_SEL1_GPIO,
+        CONFIG_FIXTURE_MUX_SEL2_GPIO,
+    };
+
+    for (size_t bit = 0; bit < sizeof(mux_gpios) / sizeof(mux_gpios[0]); bit++) {
+        if (output_gpio_is_usable(mux_gpios[bit])) {
+            ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)mux_gpios[bit], (channel >> bit) & 0x1));
+        }
+    }
+    s_mux_channel = channel;
+}
+
+static esp_mcp_value_t json_value(const char *json)
+{
+    esp_mcp_value_t value = esp_mcp_value_create_string(json);
+    if (value.type == ESP_MCP_VALUE_TYPE_INVALID) {
+        return esp_mcp_value_create_bool(false);
+    }
+    return value;
+}
+
+static void append_status_json(char *buf, size_t len)
+{
+    char adc_json[640] = {0};
+    char selected_net_json[96] = {0};
+    size_t selected_net_offset = 0;
+    if (s_selected_net_label[0]) {
+        json_append_escaped_string(selected_net_json, sizeof(selected_net_json), &selected_net_offset, s_selected_net_label);
+    } else {
+        json_appendf(selected_net_json, sizeof(selected_net_json), &selected_net_offset, "null");
+    }
+#if CONFIG_FIXTURE_ADC_ENABLE
+    snprintf(adc_json, sizeof(adc_json),
+             ",\"adc_enabled\":true,"
+             "\"adc_ready\":%s,"
+             "\"adc_error\":\"%s\","
+             "\"adc_calibration_enabled\":%s,"
+             "\"adc_calibration_ready\":%s,"
+             "\"adc_calibration_error\":\"%s\","
+             "\"adc_default_vref_mv\":%d,"
+             "\"adc_scale_numerator\":%d,"
+             "\"adc_scale_denominator\":%d,"
+             "\"adc_offset_mv\":%d,"
+             "\"adc_unit\":%d,"
+             "\"adc_channel\":%d",
+             s_adc_ready ? "true" : "false",
+             s_adc_ready ? "" : s_adc_error,
+             CONFIG_FIXTURE_ADC_CALIBRATION_ENABLE ? "true" : "false",
+             s_adc_cali_ready ? "true" : "false",
+             s_adc_cali_ready ? "" : s_adc_cali_error,
+             CONFIG_FIXTURE_ADC_DEFAULT_VREF_MV,
+             CONFIG_FIXTURE_ADC_SCALE_NUMERATOR,
+             CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR,
+             CONFIG_FIXTURE_ADC_OFFSET_MV,
+             CONFIG_FIXTURE_ADC_UNIT,
+             CONFIG_FIXTURE_ADC_CHANNEL);
+#else
+    snprintf(adc_json, sizeof(adc_json), ",\"adc_enabled\":false,\"adc_ready\":false");
+#endif
+
+    snprintf(buf, len,
+             "{\"ok\":true,"
+             "\"device\":\"ai-hardware-esp32-fixture\","
+             "\"endpoint\":\"/%s\","
+             "\"ip\":\"%s\","
+             "\"uptime_ms\":%lld,"
+             "\"mux_channel\":%d,"
+             "\"selected_net\":%s,"
+             "\"load_switch_enabled\":%s,"
+             "\"reset_gpio\":%d,"
+             "\"load_switch_gpio\":%d,"
+             "\"mux_gpios\":[%d,%d,%d]"
+             "%s}",
+             CONFIG_FIXTURE_MCP_ENDPOINT,
+             s_ip_addr,
+             (long long)(esp_timer_get_time() / 1000),
+             s_mux_channel,
+             selected_net_json,
+             s_load_switch_enabled ? "true" : "false",
+             CONFIG_FIXTURE_RESET_GPIO,
+             CONFIG_FIXTURE_LOAD_SWITCH_GPIO,
+             CONFIG_FIXTURE_MUX_SEL0_GPIO,
+             CONFIG_FIXTURE_MUX_SEL1_GPIO,
+             CONFIG_FIXTURE_MUX_SEL2_GPIO,
+             adc_json);
+}
+
+static void append_net_map_json(char *buf, size_t len)
+{
+    const int entry_count = count_enabled_net_entries();
+    const int invalid_entry_count = count_invalid_net_entries();
+    size_t offset = 0;
+    bool first = true;
+
+    json_appendf(buf,
+                 len,
+                 &offset,
+                 "{\"ok\":%s,"
+                 "\"entry_count\":%d,"
+                 "\"invalid_entry_count\":%d,"
+                 "\"mux_max_channel\":%d,"
+                 "\"entries\":[",
+                 invalid_entry_count == 0 ? "true" : "false",
+                 entry_count,
+                 invalid_entry_count,
+                 CONFIG_FIXTURE_MUX_MAX_CHANNEL);
+
+    for (size_t i = 0; i < sizeof(s_net_map) / sizeof(s_net_map[0]); i++) {
+        if (!net_label_is_enabled(s_net_map[i].label)) {
+            continue;
+        }
+
+        if (!first) {
+            json_appendf(buf, len, &offset, ",");
+        }
+        first = false;
+        json_appendf(buf, len, &offset, "{\"net\":");
+        json_append_escaped_string(buf, len, &offset, s_net_map[i].label);
+        json_appendf(buf,
+                     len,
+                     &offset,
+                     ",\"mux_channel\":%d,\"selectable\":%s}",
+                     s_net_map[i].channel,
+                     net_entry_is_selectable(&s_net_map[i]) ? "true" : "false");
+    }
+
+    json_appendf(buf, len, &offset, "]}");
+}
+
+static esp_mcp_value_t ping_callback(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    char payload[192];
+    snprintf(payload, sizeof(payload),
+             "{\"ok\":true,\"device\":\"ai-hardware-esp32-fixture\",\"uptime_ms\":%lld}",
+             (long long)(esp_timer_get_time() / 1000));
+    return json_value(payload);
+}
+
+static esp_mcp_value_t get_status_callback(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+    char payload[1024];
+    append_status_json(payload, sizeof(payload));
+    return json_value(payload);
+}
+
+static esp_mcp_value_t self_test_callback(const esp_mcp_property_list_t *properties)
+{
+    (void)properties;
+
+    const int invalid_output_gpios = count_invalid_output_gpios();
+    const int boot_strapping_gpios = count_boot_strapping_gpios();
+    const int required_mux_bits = mux_required_select_bits();
+    const bool mux_config_ok = mux_config_supports_max_channel();
+    const bool mux_settle_ok = CONFIG_FIXTURE_MUX_SETTLE_MS <= CONFIG_FIXTURE_MAX_MUX_SETTLE_MS;
+    const int net_map_entry_count = count_enabled_net_entries();
+    const int invalid_net_map_entries = count_invalid_net_entries();
+#if CONFIG_FIXTURE_ADC_ENABLE
+    const bool adc_ok = s_adc_ready;
+    const bool adc_scale_ok = CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR > 0;
+#else
+    const bool adc_ok = true;
+    const bool adc_scale_ok = true;
+#endif
+    const bool ok = invalid_output_gpios == 0 && mux_config_ok && mux_settle_ok && invalid_net_map_entries == 0 && adc_ok && adc_scale_ok;
+
+    char payload[1408];
+    snprintf(payload, sizeof(payload),
+             "{\"ok\":%s,"
+             "\"invalid_output_gpio_count\":%d,"
+             "\"boot_strapping_gpio_count\":%d,"
+             "\"reset_gpio_ok\":%s,"
+             "\"load_switch_gpio_ok\":%s,"
+             "\"mux_max_channel\":%d,"
+             "\"mux_required_select_bits\":%d,"
+             "\"mux_settle_ms\":%d,"
+             "\"max_mux_settle_ms\":%d,"
+             "\"mux_settle_ok\":%s,"
+             "\"mux_config_ok\":%s,"
+             "\"mux_gpio_ok\":[%s,%s,%s],"
+             "\"net_map_entry_count\":%d,"
+             "\"invalid_net_map_entry_count\":%d,"
+             "\"net_map_ok\":%s,"
+             "\"free_heap_bytes\":%u,"
+             "\"minimum_free_heap_bytes\":%u,"
+             "\"adc_enabled\":%s,"
+             "\"adc_ready\":%s,"
+             "\"adc_calibration_enabled\":%s,"
+             "\"adc_calibration_ready\":%s,"
+             "\"adc_default_vref_mv\":%d,"
+             "\"adc_scale_numerator\":%d,"
+             "\"adc_scale_denominator\":%d,"
+             "\"adc_offset_mv\":%d,"
+             "\"adc_scale_ok\":%s"
+#if CONFIG_FIXTURE_ADC_ENABLE
+             ",\"adc_error\":\"%s\","
+             "\"adc_calibration_error\":\"%s\""
+#endif
+             "}",
+             ok ? "true" : "false",
+             invalid_output_gpios,
+             boot_strapping_gpios,
+             output_gpio_config_is_ok(CONFIG_FIXTURE_RESET_GPIO) ? "true" : "false",
+             output_gpio_config_is_ok(CONFIG_FIXTURE_LOAD_SWITCH_GPIO) ? "true" : "false",
+             CONFIG_FIXTURE_MUX_MAX_CHANNEL,
+             required_mux_bits,
+             CONFIG_FIXTURE_MUX_SETTLE_MS,
+             CONFIG_FIXTURE_MAX_MUX_SETTLE_MS,
+             mux_settle_ok ? "true" : "false",
+             mux_config_ok ? "true" : "false",
+             output_gpio_config_is_ok(CONFIG_FIXTURE_MUX_SEL0_GPIO) ? "true" : "false",
+             output_gpio_config_is_ok(CONFIG_FIXTURE_MUX_SEL1_GPIO) ? "true" : "false",
+             output_gpio_config_is_ok(CONFIG_FIXTURE_MUX_SEL2_GPIO) ? "true" : "false",
+             net_map_entry_count,
+             invalid_net_map_entries,
+             invalid_net_map_entries == 0 ? "true" : "false",
+             (unsigned int)esp_get_free_heap_size(),
+             (unsigned int)esp_get_minimum_free_heap_size(),
+#if CONFIG_FIXTURE_ADC_ENABLE
+             "true",
+             s_adc_ready ? "true" : "false",
+             CONFIG_FIXTURE_ADC_CALIBRATION_ENABLE ? "true" : "false",
+             s_adc_cali_ready ? "true" : "false",
+             CONFIG_FIXTURE_ADC_DEFAULT_VREF_MV,
+             CONFIG_FIXTURE_ADC_SCALE_NUMERATOR,
+             CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR,
+             CONFIG_FIXTURE_ADC_OFFSET_MV,
+             adc_scale_ok ? "true" : "false",
+             s_adc_ready ? "" : s_adc_error,
+             s_adc_cali_ready ? "" : s_adc_cali_error
+#else
+             "false",
+             "false",
+             "false",
+             "false",
+             0,
+             1,
+             1,
+             0,
+             "true"
+#endif
+            );
+    return json_value(payload);
+}
+
+static esp_mcp_value_t set_mux_channel_callback(const esp_mcp_property_list_t *properties)
+{
+    const int channel = esp_mcp_property_list_get_property_int(properties, "channel");
+    if (channel < 0 || channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
+        char payload[128];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"channel_out_of_range\",\"max_channel\":%d}",
+                 CONFIG_FIXTURE_MUX_MAX_CHANNEL);
+        return json_value(payload);
+    }
+    if (!mux_channel_can_be_selected(channel)) {
+        char payload[160];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"mux_channel_not_representable\",\"channel\":%d}",
+                 channel);
+        return json_value(payload);
+    }
+
+    set_mux_channel(channel);
+    s_selected_net_label[0] = '\0';
+
+    char payload[128];
+    snprintf(payload, sizeof(payload), "{\"ok\":true,\"mux_channel\":%d}", s_mux_channel);
+    return json_value(payload);
+}
+
+static esp_mcp_value_t select_net_callback(const esp_mcp_property_list_t *properties)
+{
+    const char *net = esp_mcp_property_list_get_property_string(properties, "net");
+    if (!net_label_is_enabled(net)) {
+        return json_value("{\"ok\":false,\"error\":\"missing_net\"}");
+    }
+
+    const fixture_net_entry_t *entry = find_net_entry(net);
+    if (!entry) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"unknown_net\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, net);
+        json_appendf(payload, sizeof(payload), &offset, "}");
+        return json_value(payload);
+    }
+
+    if (entry->channel < 0 || entry->channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     "{\"ok\":false,\"error\":\"net_channel_out_of_range\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     ",\"mux_channel\":%d,\"max_channel\":%d}",
+                     entry->channel,
+                     CONFIG_FIXTURE_MUX_MAX_CHANNEL);
+        return json_value(payload);
+    }
+
+    if (!mux_channel_can_be_selected(entry->channel)) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     "{\"ok\":false,\"error\":\"net_channel_not_representable\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry->channel);
+        return json_value(payload);
+    }
+
+    set_mux_channel(entry->channel);
+    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
+
+    char payload[256];
+    size_t offset = 0;
+    json_appendf(payload, sizeof(payload), &offset, "{\"ok\":true,\"net\":");
+    json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+    json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", s_mux_channel);
+    return json_value(payload);
+}
+
+static esp_mcp_value_t reset_dut_callback(const esp_mcp_property_list_t *properties)
+{
+    if (!output_gpio_is_usable(CONFIG_FIXTURE_RESET_GPIO)) {
+        return json_value("{\"ok\":false,\"error\":\"reset_gpio_disabled\"}");
+    }
+
+    int pulse_ms = esp_mcp_property_list_get_property_int(properties, "pulse_ms");
+    if (pulse_ms < 10) {
+        pulse_ms = 10;
+    }
+    if (pulse_ms > CONFIG_FIXTURE_MAX_RESET_PULSE_MS) {
+        char payload[160];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"pulse_too_long\",\"max_pulse_ms\":%d}",
+                 CONFIG_FIXTURE_MAX_RESET_PULSE_MS);
+        return json_value(payload);
+    }
+
+    set_reset_active();
+    vTaskDelay(pdMS_TO_TICKS(pulse_ms));
+    set_reset_inactive();
+
+    char payload[128];
+    snprintf(payload, sizeof(payload), "{\"ok\":true,\"pulse_ms\":%d}", pulse_ms);
+    return json_value(payload);
+}
+
+static esp_mcp_value_t set_load_switch_callback(const esp_mcp_property_list_t *properties)
+{
+    if (!output_gpio_is_usable(CONFIG_FIXTURE_LOAD_SWITCH_GPIO)) {
+        return json_value("{\"ok\":false,\"error\":\"load_switch_gpio_disabled\"}");
+    }
+
+    const bool enabled = esp_mcp_property_list_get_property_bool(properties, "enabled");
+    set_load_switch(enabled);
+
+    char payload[128];
+    snprintf(payload, sizeof(payload), "{\"ok\":true,\"load_switch_enabled\":%s}",
+             s_load_switch_enabled ? "true" : "false");
+    return json_value(payload);
+}
+
+#if CONFIG_FIXTURE_ADC_ENABLE
+typedef struct {
+    int samples;
+    int raw_avg;
+    int raw_min;
+    int raw_max;
+    int raw_last;
+    bool millivolts_valid;
+    int mv_avg;
+    int mv_min;
+    int mv_max;
+    int mv_last;
+    bool scaled_millivolts_valid;
+    int scaled_mv_avg;
+    int scaled_mv_min;
+    int scaled_mv_max;
+    int scaled_mv_last;
+} adc_reading_t;
+
+static int normalize_adc_samples(int samples)
+{
+    if (samples < 1) {
+        return 1;
+    }
+    if (samples > 64) {
+        return 64;
+    }
+    return samples;
+}
+
+static int scale_adc_millivolts(int mv)
+{
+    const int64_t scaled = ((int64_t)mv * CONFIG_FIXTURE_ADC_SCALE_NUMERATOR) /
+                           CONFIG_FIXTURE_ADC_SCALE_DENOMINATOR +
+                           CONFIG_FIXTURE_ADC_OFFSET_MV;
+    if (scaled > INT32_MAX) {
+        return INT32_MAX;
+    }
+    if (scaled < INT32_MIN) {
+        return INT32_MIN;
+    }
+    return (int)scaled;
+}
+
+static esp_err_t read_adc_average(int samples, adc_reading_t *reading)
+{
+    if (!reading) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    samples = normalize_adc_samples(samples);
+    int sum = 0;
+    int raw = 0;
+    int min_raw = 0;
+    int max_raw = 0;
+
+    for (int i = 0; i < samples; i++) {
+        esp_err_t ret = adc_oneshot_read(s_adc_handle, (adc_channel_t)CONFIG_FIXTURE_ADC_CHANNEL, &raw);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        if (i == 0 || raw < min_raw) {
+            min_raw = raw;
+        }
+        if (i == 0 || raw > max_raw) {
+            max_raw = raw;
+        }
+        sum += raw;
+    }
+
+    reading->samples = samples;
+    reading->raw_avg = sum / samples;
+    reading->raw_min = min_raw;
+    reading->raw_max = max_raw;
+    reading->raw_last = raw;
+    reading->millivolts_valid = false;
+    if (s_adc_cali_ready) {
+        esp_err_t ret = adc_cali_raw_to_voltage(s_adc_cali_handle, reading->raw_avg, &reading->mv_avg);
+        ret |= adc_cali_raw_to_voltage(s_adc_cali_handle, reading->raw_min, &reading->mv_min);
+        ret |= adc_cali_raw_to_voltage(s_adc_cali_handle, reading->raw_max, &reading->mv_max);
+        ret |= adc_cali_raw_to_voltage(s_adc_cali_handle, reading->raw_last, &reading->mv_last);
+        reading->millivolts_valid = ret == ESP_OK;
+        if (reading->millivolts_valid) {
+            reading->scaled_mv_avg = scale_adc_millivolts(reading->mv_avg);
+            reading->scaled_mv_min = scale_adc_millivolts(reading->mv_min);
+            reading->scaled_mv_max = scale_adc_millivolts(reading->mv_max);
+            reading->scaled_mv_last = scale_adc_millivolts(reading->mv_last);
+            reading->scaled_millivolts_valid = true;
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_mcp_value_t read_adc_raw_callback(const esp_mcp_property_list_t *properties)
+{
+    if (!s_adc_ready) {
+        char payload[160];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"adc_not_ready\",\"detail\":\"%s\"}",
+                 s_adc_error);
+        return json_value(payload);
+    }
+
+    adc_reading_t reading = {0};
+    esp_err_t ret = read_adc_average(esp_mcp_property_list_get_property_int(properties, "samples"), &reading);
+    if (ret != ESP_OK) {
+        char payload[192];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"adc_read_failed\",\"esp_err\":\"%s\"}",
+                 esp_err_to_name(ret));
+        return json_value(payload);
+    }
+
+    char payload[768];
+    size_t offset = 0;
+    json_appendf(payload,
+                 sizeof(payload),
+                 &offset,
+                 "{\"ok\":true,"
+                 "\"adc_unit\":%d,"
+                 "\"adc_channel\":%d,"
+                 "\"samples\":%d,"
+                 "\"raw_avg\":%d,"
+                 "\"raw_min\":%d,"
+                 "\"raw_max\":%d,"
+                 "\"raw_last\":%d,"
+                 "\"millivolts_valid\":%s,"
+                 "\"scaled_millivolts_valid\":%s",
+                 CONFIG_FIXTURE_ADC_UNIT,
+                 CONFIG_FIXTURE_ADC_CHANNEL,
+                 reading.samples,
+                 reading.raw_avg,
+                 reading.raw_min,
+                 reading.raw_max,
+                 reading.raw_last,
+                 reading.millivolts_valid ? "true" : "false",
+                 reading.scaled_millivolts_valid ? "true" : "false");
+    if (reading.millivolts_valid) {
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     ",\"mv_avg\":%d,\"mv_min\":%d,\"mv_max\":%d,\"mv_last\":%d",
+                     reading.mv_avg,
+                     reading.mv_min,
+                     reading.mv_max,
+                     reading.mv_last);
+    }
+    if (reading.scaled_millivolts_valid) {
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     ",\"scaled_mv_avg\":%d,\"scaled_mv_min\":%d,\"scaled_mv_max\":%d,\"scaled_mv_last\":%d",
+                     reading.scaled_mv_avg,
+                     reading.scaled_mv_min,
+                     reading.scaled_mv_max,
+                     reading.scaled_mv_last);
+    }
+    json_appendf(payload, sizeof(payload), &offset, "}");
+    return json_value(payload);
+}
+
+static esp_mcp_value_t read_net_adc_raw_callback(const esp_mcp_property_list_t *properties)
+{
+    if (!s_adc_ready) {
+        char payload[160];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"adc_not_ready\",\"detail\":\"%s\"}",
+                 s_adc_error);
+        return json_value(payload);
+    }
+
+    const char *net = esp_mcp_property_list_get_property_string(properties, "net");
+    if (!net_label_is_enabled(net)) {
+        return json_value("{\"ok\":false,\"error\":\"missing_net\"}");
+    }
+
+    const fixture_net_entry_t *entry = find_net_entry(net);
+    if (!entry) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload, sizeof(payload), &offset, "{\"ok\":false,\"error\":\"unknown_net\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, net);
+        json_appendf(payload, sizeof(payload), &offset, "}");
+        return json_value(payload);
+    }
+
+    if (entry->channel < 0 || entry->channel > CONFIG_FIXTURE_MUX_MAX_CHANNEL) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     "{\"ok\":false,\"error\":\"net_channel_out_of_range\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     ",\"mux_channel\":%d,\"max_channel\":%d}",
+                     entry->channel,
+                     CONFIG_FIXTURE_MUX_MAX_CHANNEL);
+        return json_value(payload);
+    }
+
+    if (!mux_channel_can_be_selected(entry->channel)) {
+        char payload[256];
+        size_t offset = 0;
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     "{\"ok\":false,\"error\":\"net_channel_not_representable\",\"net\":");
+        json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+        json_appendf(payload, sizeof(payload), &offset, ",\"mux_channel\":%d}", entry->channel);
+        return json_value(payload);
+    }
+
+    int settle_ms = esp_mcp_property_list_get_property_int(properties, "settle_ms");
+    if (settle_ms <= 0) {
+        settle_ms = CONFIG_FIXTURE_MUX_SETTLE_MS;
+    }
+    if (settle_ms > CONFIG_FIXTURE_MAX_MUX_SETTLE_MS) {
+        char payload[160];
+        snprintf(payload,
+                 sizeof(payload),
+                 "{\"ok\":false,\"error\":\"settle_too_long\",\"max_settle_ms\":%d}",
+                 CONFIG_FIXTURE_MAX_MUX_SETTLE_MS);
+        return json_value(payload);
+    }
+
+    set_mux_channel(entry->channel);
+    snprintf(s_selected_net_label, sizeof(s_selected_net_label), "%s", entry->label);
+    if (settle_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(settle_ms));
+    }
+
+    adc_reading_t reading = {0};
+    esp_err_t ret = read_adc_average(esp_mcp_property_list_get_property_int(properties, "samples"), &reading);
+    if (ret != ESP_OK) {
+        char payload[192];
+        snprintf(payload, sizeof(payload),
+                 "{\"ok\":false,\"error\":\"adc_read_failed\",\"esp_err\":\"%s\"}",
+                 esp_err_to_name(ret));
+        return json_value(payload);
+    }
+
+    char payload[768];
+    size_t offset = 0;
+    json_appendf(payload, sizeof(payload), &offset, "{\"ok\":true,\"net\":");
+    json_append_escaped_string(payload, sizeof(payload), &offset, entry->label);
+    json_appendf(payload,
+                 sizeof(payload),
+                 &offset,
+                 ",\"mux_channel\":%d,"
+                 "\"settle_ms\":%d,"
+                 "\"adc_unit\":%d,"
+                 "\"adc_channel\":%d,"
+                 "\"samples\":%d,"
+                 "\"raw_avg\":%d,"
+                 "\"raw_min\":%d,"
+                 "\"raw_max\":%d,"
+                 "\"raw_last\":%d,"
+                 "\"millivolts_valid\":%s,"
+                 "\"scaled_millivolts_valid\":%s",
+                 s_mux_channel,
+                 settle_ms,
+                 CONFIG_FIXTURE_ADC_UNIT,
+                 CONFIG_FIXTURE_ADC_CHANNEL,
+                 reading.samples,
+                 reading.raw_avg,
+                 reading.raw_min,
+                 reading.raw_max,
+                 reading.raw_last,
+                 reading.millivolts_valid ? "true" : "false",
+                 reading.scaled_millivolts_valid ? "true" : "false");
+    if (reading.millivolts_valid) {
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     ",\"mv_avg\":%d,\"mv_min\":%d,\"mv_max\":%d,\"mv_last\":%d",
+                     reading.mv_avg,
+                     reading.mv_min,
+                     reading.mv_max,
+                     reading.mv_last);
+    }
+    if (reading.scaled_millivolts_valid) {
+        json_appendf(payload,
+                     sizeof(payload),
+                     &offset,
+                     ",\"scaled_mv_avg\":%d,\"scaled_mv_min\":%d,\"scaled_mv_max\":%d,\"scaled_mv_last\":%d",
+                     reading.scaled_mv_avg,
+                     reading.scaled_mv_min,
+                     reading.scaled_mv_max,
+                     reading.scaled_mv_last);
+    }
+    json_appendf(payload, sizeof(payload), &offset, "}");
+    return json_value(payload);
+}
+#endif
+
+static esp_err_t read_status_resource(const char *uri,
+                                      char **out_mime,
+                                      char **out_text,
+                                      char **out_blob,
+                                      void *ctx)
+{
+    (void)uri;
+    (void)ctx;
+    ESP_RETURN_ON_FALSE(out_mime && out_text && out_blob, ESP_ERR_INVALID_ARG, TAG, "Invalid resource output");
+
+    *out_mime = strdup("application/json");
+    *out_blob = NULL;
+    if (!*out_mime) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    char payload[1024];
+    append_status_json(payload, sizeof(payload));
+    *out_text = strdup(payload);
+    if (!*out_text) {
+        free(*out_mime);
+        *out_mime = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t read_net_map_resource(const char *uri,
+                                       char **out_mime,
+                                       char **out_text,
+                                       char **out_blob,
+                                       void *ctx)
+{
+    (void)uri;
+    (void)ctx;
+    ESP_RETURN_ON_FALSE(out_mime && out_text && out_blob, ESP_ERR_INVALID_ARG, TAG, "Invalid resource output");
+
+    *out_mime = strdup("application/json");
+    *out_blob = NULL;
+    if (!*out_mime) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    char payload[1536];
+    append_net_map_json(payload, sizeof(payload));
+    *out_text = strdup(payload);
+    if (!*out_text) {
+        free(*out_mime);
+        *out_mime = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    (void)arg;
+
+#if CONFIG_FIXTURE_WIFI_MODE_STA
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_sta_retry_count < CONFIG_FIXTURE_WIFI_STA_MAX_RETRY) {
+            esp_wifi_connect();
+            s_sta_retry_count++;
+            ESP_LOGW(TAG, "Retrying Wi-Fi connection (%d/%d)", s_sta_retry_count, CONFIG_FIXTURE_WIFI_STA_MAX_RETRY);
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        snprintf(s_ip_addr, sizeof(s_ip_addr), IPSTR, IP2STR(&event->ip_info.ip));
+        s_sta_retry_count = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+#else
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
+        ESP_LOGI(TAG, "Station joined AP, aid=%d", event->aid);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
+        ESP_LOGI(TAG, "Station left AP, aid=%d", event->aid);
+    }
+#endif
+}
+
+#if CONFIG_FIXTURE_WIFI_MODE_AP
+static void start_wifi_ap(void)
+{
+    esp_netif_create_default_wifi_ap();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+
+    uint8_t mac[6] = {0};
+    ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP));
+
+    wifi_config_t wifi_config = {0};
+    snprintf((char *)wifi_config.ap.ssid,
+             sizeof(wifi_config.ap.ssid),
+             "%s-%02X%02X",
+             CONFIG_FIXTURE_WIFI_AP_SSID_PREFIX,
+             mac[4],
+             mac[5]);
+    wifi_config.ap.ssid_len = strlen((char *)wifi_config.ap.ssid);
+    wifi_config.ap.channel = CONFIG_FIXTURE_WIFI_AP_CHANNEL;
+    wifi_config.ap.max_connection = CONFIG_FIXTURE_WIFI_AP_MAX_CONN;
+    snprintf((char *)wifi_config.ap.password,
+             sizeof(wifi_config.ap.password),
+             "%s",
+             CONFIG_FIXTURE_WIFI_AP_PASSWORD);
+    const size_t ap_password_len = strlen(CONFIG_FIXTURE_WIFI_AP_PASSWORD);
+    ESP_ERROR_CHECK((ap_password_len == 0 || ap_password_len >= 8) ? ESP_OK : ESP_ERR_INVALID_ARG);
+    wifi_config.ap.authmode = ap_password_len == 0 ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_WPA2_PSK;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    snprintf(s_ip_addr, sizeof(s_ip_addr), "192.168.4.1");
+    ESP_LOGI(TAG, "SoftAP started: ssid=%s password=%s ip=%s",
+             wifi_config.ap.ssid,
+             strlen(CONFIG_FIXTURE_WIFI_AP_PASSWORD) ? "<configured>" : "<open>",
+             s_ip_addr);
+}
+#endif
+
+#if CONFIG_FIXTURE_WIFI_MODE_STA
+static void start_wifi_sta(void)
+{
+    s_wifi_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(s_wifi_event_group ? ESP_OK : ESP_ERR_NO_MEM);
+
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+
+    wifi_config_t wifi_config = {0};
+    snprintf((char *)wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid), "%s", CONFIG_FIXTURE_WIFI_STA_SSID);
+    snprintf((char *)wifi_config.sta.password, sizeof(wifi_config.sta.password), "%s", CONFIG_FIXTURE_WIFI_STA_PASSWORD);
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE,
+                                           pdFALSE,
+                                           pdMS_TO_TICKS(30000));
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Connected to Wi-Fi ssid=%s ip=%s", CONFIG_FIXTURE_WIFI_STA_SSID, s_ip_addr);
+    } else {
+        ESP_LOGE(TAG, "Failed to connect to Wi-Fi ssid=%s", CONFIG_FIXTURE_WIFI_STA_SSID);
+        abort();
+    }
+}
+#endif
+
+static void init_wifi(void)
+{
+#if CONFIG_FIXTURE_WIFI_MODE_STA
+    start_wifi_sta();
+#else
+    start_wifi_ap();
+#endif
+}
+
+static void init_fixture_io(void)
+{
+    warn_if_boot_strapping_gpio("DUT reset", CONFIG_FIXTURE_RESET_GPIO);
+    warn_if_boot_strapping_gpio("Load switch", CONFIG_FIXTURE_LOAD_SWITCH_GPIO);
+    warn_if_boot_strapping_gpio("MUX SEL0", CONFIG_FIXTURE_MUX_SEL0_GPIO);
+    warn_if_boot_strapping_gpio("MUX SEL1", CONFIG_FIXTURE_MUX_SEL1_GPIO);
+    warn_if_boot_strapping_gpio("MUX SEL2", CONFIG_FIXTURE_MUX_SEL2_GPIO);
+
+    configure_output_gpio(CONFIG_FIXTURE_RESET_GPIO, CONFIG_FIXTURE_RESET_ACTIVE_LOW ? 1 : 0);
+    configure_output_gpio(CONFIG_FIXTURE_LOAD_SWITCH_GPIO, CONFIG_FIXTURE_LOAD_SWITCH_ACTIVE_HIGH ? 0 : 1);
+    configure_output_gpio(CONFIG_FIXTURE_MUX_SEL0_GPIO, 0);
+    configure_output_gpio(CONFIG_FIXTURE_MUX_SEL1_GPIO, 0);
+    configure_output_gpio(CONFIG_FIXTURE_MUX_SEL2_GPIO, 0);
+    set_mux_channel(0);
+    set_load_switch(false);
+}
+
+#if CONFIG_FIXTURE_ADC_ENABLE
+static bool adc_channel_is_supported(void)
+{
+    if (CONFIG_FIXTURE_ADC_UNIT == 1) {
+        return CONFIG_FIXTURE_ADC_CHANNEL >= 0 && CONFIG_FIXTURE_ADC_CHANNEL <= 7;
+    }
+    if (CONFIG_FIXTURE_ADC_UNIT == 2) {
+        return CONFIG_FIXTURE_ADC_CHANNEL >= 0 && CONFIG_FIXTURE_ADC_CHANNEL <= 9;
+    }
+    return false;
+}
+
+static adc_unit_t adc_unit_id(void)
+{
+    return CONFIG_FIXTURE_ADC_UNIT == 1 ? ADC_UNIT_1 : ADC_UNIT_2;
+}
+
+static void init_adc_calibration(void)
+{
+    s_adc_cali_ready = false;
+    snprintf(s_adc_cali_error, sizeof(s_adc_cali_error), "disabled");
+
+    if (!CONFIG_FIXTURE_ADC_CALIBRATION_ENABLE) {
+        return;
+    }
+
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    adc_cali_line_fitting_config_t cali_config = {
+        .unit_id = adc_unit_id(),
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+#if CONFIG_IDF_TARGET_ESP32
+        .default_vref = CONFIG_FIXTURE_ADC_DEFAULT_VREF_MV,
+#endif
+    };
+    esp_err_t ret = adc_cali_create_scheme_line_fitting(&cali_config, &s_adc_cali_handle);
+    if (ret != ESP_OK) {
+        snprintf(s_adc_cali_error, sizeof(s_adc_cali_error), "%s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "ADC calibration unavailable: %s", s_adc_cali_error);
+        return;
+    }
+
+    s_adc_cali_ready = true;
+    s_adc_cali_error[0] = '\0';
+#else
+    snprintf(s_adc_cali_error, sizeof(s_adc_cali_error), "unsupported_scheme");
+    ESP_LOGW(TAG, "ADC line-fitting calibration is not supported on this target");
+#endif
+}
+
+static void init_adc(void)
+{
+    s_adc_ready = false;
+    snprintf(s_adc_error, sizeof(s_adc_error), "not_initialized");
+    s_adc_cali_ready = false;
+    snprintf(s_adc_cali_error, sizeof(s_adc_cali_error), "not_initialized");
+
+    if (!adc_channel_is_supported()) {
+        snprintf(s_adc_error, sizeof(s_adc_error), "unsupported_channel");
+        ESP_LOGE(TAG,
+                 "ADC unit/channel unsupported: unit=%d channel=%d",
+                 CONFIG_FIXTURE_ADC_UNIT,
+                 CONFIG_FIXTURE_ADC_CHANNEL);
+        return;
+    }
+
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = adc_unit_id(),
+    };
+    esp_err_t ret = adc_oneshot_new_unit(&init_config, &s_adc_handle);
+    if (ret != ESP_OK) {
+        snprintf(s_adc_error, sizeof(s_adc_error), "%s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "ADC unit init failed: %s", s_adc_error);
+        return;
+    }
+
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN_DB_12,
+    };
+    ret = adc_oneshot_config_channel(s_adc_handle, (adc_channel_t)CONFIG_FIXTURE_ADC_CHANNEL, &config);
+    if (ret != ESP_OK) {
+        snprintf(s_adc_error, sizeof(s_adc_error), "%s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "ADC channel config failed: %s", s_adc_error);
+        return;
+    }
+
+    s_adc_ready = true;
+    s_adc_error[0] = '\0';
+    init_adc_calibration();
+}
+#endif
+
+static void add_tool_or_abort(esp_mcp_t *mcp, esp_mcp_tool_t *tool)
+{
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+}
+
+static void register_fixture_tools(esp_mcp_t *mcp)
+{
+    esp_mcp_tool_t *tool = esp_mcp_tool_create("fixture.ping",
+                                               "Check that the ESP32 fixture MCP server is alive.",
+                                               ping_callback);
+    add_tool_or_abort(mcp, tool);
+
+    tool = esp_mcp_tool_create("fixture.get_status",
+                               "Read fixture status including IP, uptime, MUX channel and GPIO configuration.",
+                               get_status_callback);
+    add_tool_or_abort(mcp, tool);
+
+    tool = esp_mcp_tool_create("fixture.self_test",
+                               "Run non-destructive fixture configuration and runtime checks.",
+                               self_test_callback);
+    add_tool_or_abort(mcp, tool);
+
+    tool = esp_mcp_tool_create("fixture.set_mux_channel",
+                               "Select an allowlisted fixture MUX channel.",
+                               set_mux_channel_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("channel", 0, 0, CONFIG_FIXTURE_MUX_MAX_CHANNEL)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.5,\"risk\":\"medium\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
+    tool = esp_mcp_tool_create("fixture.select_net",
+                               "Select a fixture MUX channel by configured board net or testpoint label.",
+                               select_net_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_string("net", CONFIG_FIXTURE_NET0_LABEL)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.7,\"risk\":\"medium\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
+    tool = esp_mcp_tool_create("fixture.reset_dut",
+                               "Pulse the DUT reset line within the configured maximum duration.",
+                               reset_dut_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("pulse_ms", 100, 10, CONFIG_FIXTURE_MAX_RESET_PULSE_MS)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.4,\"risk\":\"medium\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
+    tool = esp_mcp_tool_create("fixture.set_load_switch",
+                               "Enable or disable the fixture-controlled load switch.",
+                               set_load_switch_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_bool("enabled", false)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.4,\"risk\":\"high\"}"));
+    ESP_ERROR_CHECK(esp_mcp_add_tool(mcp, tool));
+
+#if CONFIG_FIXTURE_ADC_ENABLE
+    tool = esp_mcp_tool_create("fixture.read_adc_raw",
+                               "Read averaged raw ADC samples from the configured fixture ADC channel.",
+                               read_adc_raw_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("samples", 8, 1, 64)));
+    add_tool_or_abort(mcp, tool);
+
+    tool = esp_mcp_tool_create("fixture.read_net_adc_raw",
+                               "Select a configured net/testpoint, wait for MUX settling and read averaged raw ADC samples.",
+                               read_net_adc_raw_callback);
+    ESP_ERROR_CHECK(tool ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_string("net", CONFIG_FIXTURE_NET0_LABEL)));
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("samples", 8, 1, 64)));
+    ESP_ERROR_CHECK(esp_mcp_tool_add_property(
+        tool,
+        esp_mcp_property_create_with_int_and_range("settle_ms",
+                                                   CONFIG_FIXTURE_MUX_SETTLE_MS,
+                                                   0,
+                                                   CONFIG_FIXTURE_MAX_MUX_SETTLE_MS)));
+    ESP_ERROR_CHECK(esp_mcp_tool_set_annotations_json(
+        tool,
+        "{\"audience\":[\"assistant\"],\"priority\":0.8,\"risk\":\"medium\"}"));
+    add_tool_or_abort(mcp, tool);
+#endif
+}
+
+static void register_fixture_resources(esp_mcp_t *mcp)
+{
+    esp_mcp_resource_t *resource = esp_mcp_resource_create("fixture://status",
+                                                           "fixture.status",
+                                                           "Fixture Status",
+                                                           "Current ESP32 fixture status and configured GPIOs.",
+                                                           "application/json",
+                                                           read_status_resource,
+                                                           NULL);
+    ESP_ERROR_CHECK(resource ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_resource_set_annotations(resource, "[\"assistant\",\"user\"]", 0.8, NULL));
+    ESP_ERROR_CHECK(esp_mcp_add_resource(mcp, resource));
+
+    resource = esp_mcp_resource_create("fixture://net-map",
+                                       "fixture.net_map",
+                                       "Fixture Net Map",
+                                       "Configured board net or testpoint labels mapped to MUX channels.",
+                                       "application/json",
+                                       read_net_map_resource,
+                                       NULL);
+    ESP_ERROR_CHECK(resource ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mcp_resource_set_annotations(resource, "[\"assistant\",\"user\"]", 0.9, NULL));
+    ESP_ERROR_CHECK(esp_mcp_add_resource(mcp, resource));
+}
+
+static void start_mcp_server(void)
+{
+    esp_mcp_t *mcp = NULL;
+    ESP_ERROR_CHECK(esp_mcp_create(&mcp));
+    ESP_ERROR_CHECK(esp_mcp_set_server_info(mcp,
+                                            "AI Hardware ESP32 Fixture",
+                                            "Allowlisted fixture control MCP server for board diagnostics.",
+                                            NULL,
+                                            "https://github.com/HongfeiWan/ai-hardware"));
+    ESP_ERROR_CHECK(esp_mcp_set_instructions(
+        mcp,
+        "Use fixture tools only for low-level fixture actions. Instrument control and model diagnosis belong on the Python bench server."));
+
+    register_fixture_tools(mcp);
+    register_fixture_resources(mcp);
+
+    httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
+    http_config.server_port = CONFIG_FIXTURE_MCP_PORT;
+    http_config.stack_size = 8192;
+    http_config.max_uri_handlers = 16;
+
+    esp_mcp_mgr_config_t mcp_mgr_config = {
+        .transport = esp_mcp_transport_http_server,
+        .config = &http_config,
+        .instance = mcp,
+    };
+
+    esp_mcp_mgr_handle_t mcp_mgr_handle = 0;
+    ESP_ERROR_CHECK(esp_mcp_mgr_init(mcp_mgr_config, &mcp_mgr_handle));
+    ESP_ERROR_CHECK(esp_mcp_mgr_start(mcp_mgr_handle));
+    ESP_ERROR_CHECK(esp_mcp_mgr_register_endpoint(mcp_mgr_handle, CONFIG_FIXTURE_MCP_ENDPOINT, NULL));
+
+    ESP_LOGI(TAG,
+             "MCP server ready: http://%s:%d/%s",
+             s_ip_addr,
+             CONFIG_FIXTURE_MCP_PORT,
+             CONFIG_FIXTURE_MCP_ENDPOINT);
+}
+
+void app_main(void)
+{
+    esp_log_level_set("*", ESP_LOG_INFO);
+
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    init_fixture_io();
+#if CONFIG_FIXTURE_ADC_ENABLE
+    init_adc();
+#endif
+    init_wifi();
+    start_mcp_server();
+}

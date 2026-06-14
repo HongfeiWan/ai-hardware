@@ -1,0 +1,49 @@
+dependencies:
+  espressif/cjson:
+    component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.7.19~2
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.5.3
+  espressif/mcp-c-sdk:
+    component_hash: 58252f2ca194794f11aff0ff559b6c16cc57c0838d99558011c2f95eeae87e00
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.*
+    - name: espressif/cjson
+      registry_url: https://components.espressif.com
+      require: private
+      version: 1.*
+    - name: idf
+      require: private
+      version: '>=5.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.0.1
+  idf:
+    source:
+      type: idf
+    version: 5.4.4
+direct_dependencies:
+- espressif/mcp-c-sdk
+- idf
+manifest_hash: ee3cbddfd1e8cc0c0ca2205c05bbac9c5e5ae344ee0cdcdf8de8981a8a5e2d9a
+target: esp32
+version: 2.0.0
