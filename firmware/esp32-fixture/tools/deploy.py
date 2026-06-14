@@ -1152,8 +1152,15 @@ def preflight(args: argparse.Namespace) -> None:
     print(f"Project: {PROJECT_DIR}")
 
     idf = shutil.which("idf.py")
-    if not preflight_check("ESP-IDF", idf is not None, idf or "idf.py not found; source ESP-IDF export.sh before building"):
+    if not preflight_check(
+        "ESP-IDF",
+        idf is not None,
+        idf or "idf.py not found; source ESP-IDF export.sh before building",
+        required=args.require_idf,
+    ):
         failures += 1
+    elif idf is None:
+        warnings += 1
 
     esptool = esptool_version()
     if not preflight_check(
@@ -1163,8 +1170,15 @@ def preflight(args: argparse.Namespace) -> None:
     ):
         failures += 1
 
-    if not preflight_check("target", target_is_configured(), "sdkconfig target is esp32" if target_is_configured() else "sdkconfig is not configured for esp32"):
+    if not preflight_check(
+        "target",
+        target_is_configured(),
+        "sdkconfig target is esp32" if target_is_configured() else "sdkconfig is not configured for esp32",
+        required=args.require_build,
+    ):
         failures += 1
+    elif not target_is_configured():
+        warnings += 1
 
     build_outputs = {
         "app": BUILD_BIN,
@@ -1172,8 +1186,15 @@ def preflight(args: argparse.Namespace) -> None:
         "partition_table": PARTITION_BIN,
     }
     for label, path in build_outputs.items():
-        if not preflight_check(label, path.exists(), str(path) if path.exists() else f"missing: {path}"):
+        if not preflight_check(
+            label,
+            path.exists(),
+            str(path) if path.exists() else f"missing: {path}",
+            required=args.require_build,
+        ):
             failures += 1
+        elif not path.exists():
+            warnings += 1
 
     try:
         with open_bundle_source(args.bundle) as bundle_dir:
@@ -1470,6 +1491,16 @@ def main() -> int:
         "--require-port",
         action="store_true",
         help="Treat a missing or ambiguous ESP32 serial port as a preflight failure",
+    )
+    preflight_parser.add_argument(
+        "--require-idf",
+        action="store_true",
+        help="Treat a missing ESP-IDF environment as a preflight failure",
+    )
+    preflight_parser.add_argument(
+        "--require-build",
+        action="store_true",
+        help="Treat missing local build outputs or target configuration as a preflight failure",
     )
     preflight_parser.set_defaults(func=preflight)
 

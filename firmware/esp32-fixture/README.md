@@ -79,6 +79,7 @@ To create a distributable flash bundle:
 python3 tools/deploy.py bundle --zip
 python3 tools/deploy.py verify-bundle
 python3 tools/deploy.py verify-bundle --bundle dist/esp32-fixture.zip
+python3 tools/deploy.py preflight --bundle dist/esp32-fixture.zip
 ```
 
 The bundle is written to `dist/esp32-fixture/`, and `--zip` also creates
@@ -104,6 +105,11 @@ python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip \
 `python -m esptool`. Source the ESP-IDF `export.sh` environment first, or
 install esptool into that Python. `python3 tools/deploy.py doctor` reports the
 active esptool status.
+
+Before flashing, `python3 tools/deploy.py preflight --bundle
+dist/esp32-fixture.zip` checks ESP-IDF, esptool, build outputs, the bundle or
+zip archive and visible serial ports in one place. Add `--require-port` when
+running it as a hard gate on a flashing station.
 
 To flash the bundle and then run the MCP smoke test:
 

@@ -90,6 +90,7 @@ python3 tools/deploy.py build
 python3 tools/deploy.py bundle --zip
 python3 tools/deploy.py verify-bundle
 python3 tools/deploy.py verify-bundle --bundle dist/esp32-fixture.zip
+python3 tools/deploy.py preflight --bundle dist/esp32-fixture.zip
 python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash --smoke --prompt --wait-ready 30
 python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash --smoke --prompt --wait-ready 30
 ```
@@ -98,6 +99,7 @@ python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip --port /dev
 
 如果只想烧录已经生成并校验过的固件包，不重新 build，可以使用 `flash-bundle`。它支持 `dist/esp32-fixture` 目录和 `dist/esp32-fixture.zip`，会先校验包内容，再按 bundle 里的 `flash_args` 通过 esptool 写入 ESP32。
 烧录前需要当前 Python 环境能运行 `python -m esptool`；source ESP-IDF 的 `export.sh` 会提供这个环境，`doctor` 会显示当前 shell 是否可用。
+`preflight` 会把 ESP-IDF、esptool、构建产物、bundle/zip 校验和串口状态集中输出；默认适合烧录现成 zip 的测试站，加 `--require-port`、`--require-idf` 或 `--require-build` 可以把对应项当作失败处理。
 
 ```bash
 python3 tools/deploy.py smoke --wait-ready 30
