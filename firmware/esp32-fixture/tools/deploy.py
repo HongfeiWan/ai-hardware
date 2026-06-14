@@ -518,6 +518,43 @@ def erase_flash_command(baud: int) -> str:
     )
 
 
+def preflight_command(bundle_ref: str = "dist/esp32-fixture.zip") -> str:
+    return f"python3 tools/deploy.py preflight --bundle {bundle_ref}"
+
+
+def identify_command() -> str:
+    return "python3 tools/deploy.py identify --port /dev/cu.usbserial-XXXX --wait-port 60"
+
+
+def flash_bundle_command(bundle_ref: str = "<bundle-dir-or-zip>") -> str:
+    return (
+        "python3 tools/deploy.py flash-bundle "
+        f"--bundle {bundle_ref} --port /dev/cu.usbserial-XXXX --wait-port 60 --erase-flash"
+    )
+
+
+def mcp_connection_details(mcp: dict) -> dict[str, object]:
+    host = str(mcp.get("default_host") or DEFAULT_MCP_HOST)
+    port = parse_int(mcp.get("default_port", DEFAULT_MCP_PORT))
+    endpoint = str(mcp.get("default_endpoint") or DEFAULT_MCP_ENDPOINT).strip("/")
+    softap_prefix = str(mcp.get("default_softap_prefix") or "ai-hardware-fixture")
+    softap_password = str(mcp.get("default_softap_password") or "")
+    return {
+        "softap_ssid": f"{softap_prefix}-XXXX",
+        "softap_password": softap_password or "<open>",
+        "endpoint_url": f"http://{host}:{port}/{endpoint}",
+    }
+
+
+def print_mcp_connection(summary: dict[str, object]) -> None:
+    details = summary.get("mcp_connection")
+    if not isinstance(details, dict):
+        return
+    print(f"SoftAP SSID: {details.get('softap_ssid')}")
+    print(f"SoftAP password: {details.get('softap_password')}")
+    print(f"MCP endpoint: {details.get('endpoint_url')}")
+
+
 def prefer_callout_ports(ports: set[str]) -> list[str]:
     preferred: set[str] = set()
     for port in ports:
@@ -742,6 +779,14 @@ def run_esptool(port: str, baud: int, esptool_args: list[str], cwd: Path) -> Non
     subprocess.run(command, cwd=cwd, check=True)
 
 
+def identify(args: argparse.Namespace) -> None:
+    ensure_esptool_available()
+    port = resolve_port(args.port, args.wait_port)
+    print(f"Identifying ESP32 on {port}...")
+    run_esptool(port, args.baud, ["read_mac"], PROJECT_DIR)
+    run_esptool(port, args.baud, ["flash_id"], PROJECT_DIR)
+
+
 def flash_bundle(args: argparse.Namespace) -> None:
     source = args.bundle.resolve()
     with open_bundle_source(args.bundle) as bundle_dir:
@@ -893,6 +938,9 @@ def validate_bundle_dir(bundle_dir: Path) -> dict[str, object]:
         "flasher_args.json",
         "flash_command.txt",
         "erase_flash_command.txt",
+        "preflight_command.txt",
+        "identify_command.txt",
+        "flash_bundle_command.txt",
         "README.md",
     }
     missing_auxiliary = sorted(required_auxiliary - auxiliary_paths)
@@ -905,13 +953,24 @@ def validate_bundle_dir(bundle_dir: Path) -> dict[str, object]:
     erase_flash_command_text = (bundle_dir / "erase_flash_command.txt").read_text(encoding="utf-8").strip()
     if erase_flash_command_text != manifest.get("erase_flash_command"):
         raise RuntimeError("erase_flash_command.txt does not match manifest erase_flash_command")
+    preflight_command_text = (bundle_dir / "preflight_command.txt").read_text(encoding="utf-8").strip()
+    if preflight_command_text != manifest.get("preflight_command"):
+        raise RuntimeError("preflight_command.txt does not match manifest preflight_command")
+    identify_command_text = (bundle_dir / "identify_command.txt").read_text(encoding="utf-8").strip()
+    if identify_command_text != manifest.get("identify_command"):
+        raise RuntimeError("identify_command.txt does not match manifest identify_command")
+    flash_bundle_command_text = (bundle_dir / "flash_bundle_command.txt").read_text(encoding="utf-8").strip()
+    if flash_bundle_command_text != manifest.get("flash_bundle_command"):
+        raise RuntimeError("flash_bundle_command.txt does not match manifest flash_bundle_command")
     bundle_readme = (bundle_dir / "README.md").read_text(encoding="utf-8", errors="ignore")
     for expected_text in (
         flash_command_text,
         erase_flash_command_text,
-        "python3 tools/deploy.py preflight --bundle dist/esp32-fixture.zip",
+        "Default connection after flashing:",
+        preflight_command_text,
+        identify_command_text,
         "python3 tools/deploy.py verify-bundle --bundle dist/esp32-fixture.zip",
-        "python3 tools/deploy.py flash-bundle --bundle <bundle-dir-or-zip>",
+        flash_bundle_command_text,
         "python3 tools/deploy.py smoke --wait-ready 30",
     ):
         if expected_text not in bundle_readme:
@@ -950,7 +1009,10 @@ def validate_bundle_dir(bundle_dir: Path) -> dict[str, object]:
     sdkconfig = manifest.get("sdkconfig")
     if not isinstance(sdkconfig, dict):
         raise RuntimeError("manifest.json has no sdkconfig object")
-    if sdkconfig.get("CONFIG_FIXTURE_MCP_ENDPOINT") != manifest.get("mcp", {}).get("default_endpoint"):
+    mcp = manifest.get("mcp")
+    if not isinstance(mcp, dict):
+        raise RuntimeError("manifest.json has no mcp object")
+    if sdkconfig.get("CONFIG_FIXTURE_MCP_ENDPOINT") != mcp.get("default_endpoint"):
         raise RuntimeError("Manifest MCP endpoint does not match sdkconfig")
     if sdkconfig.get("CONFIG_FIXTURE_ADC_ENABLE") == "y":
         for key in (
@@ -971,6 +1033,7 @@ def validate_bundle_dir(bundle_dir: Path) -> dict[str, object]:
         "app_offset": hex(app_offset),
         "factory_size": factory_size,
         "factory_free": factory_size - app_size,
+        "mcp_connection": mcp_connection_details(mcp),
     }
 
 
@@ -1020,6 +1083,9 @@ def bundle(args: argparse.Namespace) -> None:
         "idf_path": project_description.get("idf_path"),
         "flash_command": flash_command(args.baud),
         "erase_flash_command": erase_flash_command(args.baud),
+        "preflight_command": preflight_command(),
+        "identify_command": identify_command(),
+        "flash_bundle_command": flash_bundle_command(),
         "flash_settings": flasher_args.get("flash_settings", {}),
         "files": bundled_files,
         "sdkconfig": sdkconfig,
@@ -1031,9 +1097,13 @@ def bundle(args: argparse.Namespace) -> None:
             "default_endpoint": sdkconfig.get("CONFIG_FIXTURE_MCP_ENDPOINT", DEFAULT_MCP_ENDPOINT),
         },
     }
+    mcp_details = mcp_connection_details(manifest["mcp"])
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (output_dir / "flash_command.txt").write_text(flash_command(args.baud) + "\n", encoding="utf-8")
     (output_dir / "erase_flash_command.txt").write_text(erase_flash_command(args.baud) + "\n", encoding="utf-8")
+    (output_dir / "preflight_command.txt").write_text(preflight_command() + "\n", encoding="utf-8")
+    (output_dir / "identify_command.txt").write_text(identify_command() + "\n", encoding="utf-8")
+    (output_dir / "flash_bundle_command.txt").write_text(flash_bundle_command() + "\n", encoding="utf-8")
     (output_dir / "README.md").write_text(
         "\n".join(
             [
@@ -1043,10 +1113,22 @@ def bundle(args: argparse.Namespace) -> None:
                 "Both the direct esptool commands and the source-project helper require a Python environment with esptool installed.",
                 "Sourcing ESP-IDF `export.sh` provides that environment.",
                 "",
+                "Default connection after flashing:",
+                "",
+                f"- SoftAP SSID: `{mcp_details['softap_ssid']}`",
+                f"- SoftAP password: `{mcp_details['softap_password']}`",
+                f"- MCP endpoint: `{mcp_details['endpoint_url']}`",
+                "",
                 "From the source project, run a host and bundle readiness check:",
                 "",
                 "```bash",
-                "python3 tools/deploy.py preflight --bundle dist/esp32-fixture.zip",
+                preflight_command(),
+                "```",
+                "",
+                "With a board connected, identify the ESP32 and flash chip before writing firmware:",
+                "",
+                "```bash",
+                identify_command(),
                 "```",
                 "",
                 "For a clean first bring-up, erase stale NVS/runtime configuration first:",
@@ -1071,7 +1153,7 @@ def bundle(args: argparse.Namespace) -> None:
                 "From the source project, flash this verified bundle without rebuilding:",
                 "",
                 "```bash",
-                "python3 tools/deploy.py flash-bundle --bundle <bundle-dir-or-zip> --port /dev/cu.usbserial-XXXX --wait-port 60 --erase-flash",
+                flash_bundle_command(),
                 "```",
                 "",
                 "After flashing, connect to the fixture network and run the MCP smoke test from the source project:",
@@ -1093,6 +1175,9 @@ def bundle(args: argparse.Namespace) -> None:
             "flasher_args.json",
             "flash_command.txt",
             "erase_flash_command.txt",
+            "preflight_command.txt",
+            "identify_command.txt",
+            "flash_bundle_command.txt",
             "README.md",
         )
     ]
@@ -1111,6 +1196,7 @@ def bundle(args: argparse.Namespace) -> None:
         f"{summary['factory_free']} bytes free in factory partition"
     )
     print(f"Flash command: {flash_command(args.baud)}")
+    print_mcp_connection(summary)
     if archive_path:
         print(f"Zip archive: {archive_path}")
 
@@ -1124,6 +1210,7 @@ def verify_bundle(args: argparse.Namespace) -> None:
     print(f"Auxiliary files: {summary['auxiliary_file_count']}")
     print(f"App: {summary['app_path']} ({summary['app_size']} bytes at {summary['app_offset']})")
     print(f"Factory partition free: {summary['factory_free']} bytes")
+    print_mcp_connection(summary)
 
 
 def relative_or_absolute(path: Path) -> str:
@@ -1204,6 +1291,7 @@ def preflight(args: argparse.Namespace) -> None:
             f"{args.bundle.resolve()} -> app {summary['app_size']} bytes at {summary['app_offset']}, "
             f"{summary['factory_free']} bytes free"
         )
+        print_mcp_connection(summary)
     except RuntimeError as exc:
         print(f"FAIL: bundle: {exc}")
         failures += 1
@@ -1361,6 +1449,10 @@ def main() -> int:
     erase_parser = subparsers.add_parser("erase-flash", help="Erase the whole ESP32 flash")
     add_port_args(erase_parser)
     erase_parser.set_defaults(func=erase_flash)
+
+    identify_parser = subparsers.add_parser("identify", help="Read ESP32 MAC and flash ID without writing flash")
+    add_port_args(identify_parser)
+    identify_parser.set_defaults(func=identify)
 
     monitor_parser = subparsers.add_parser("monitor", help="Open ESP-IDF serial monitor")
     add_port_args(monitor_parser)

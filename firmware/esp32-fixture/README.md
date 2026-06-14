@@ -84,11 +84,13 @@ python3 tools/deploy.py preflight --bundle dist/esp32-fixture.zip
 
 The bundle is written to `dist/esp32-fixture/`, and `--zip` also creates
 `dist/esp32-fixture.zip`. Both forms include `flash_args`, `flasher_args.json`,
-`manifest.json`, SHA-256 hashes, generated esptool commands and a short README.
+`manifest.json`, SHA-256 hashes, generated esptool/source-project commands and
+a short README.
 The verification step accepts either the directory or the zip archive, and
 checks the manifest, hashes, `flash_args`, `flasher_args.json`, command files,
 README, MCP config metadata and app image size against the factory partition.
-From inside the bundle directory:
+It also prints the default SoftAP SSID pattern, password and MCP endpoint from
+the bundle manifest. From inside the bundle directory:
 
 ```bash
 python -m esptool --chip esp32 -b 460800 --before default_reset --after hard_reset write_flash @flash_args
@@ -108,8 +110,16 @@ active esptool status.
 
 Before flashing, `python3 tools/deploy.py preflight --bundle
 dist/esp32-fixture.zip` checks ESP-IDF, esptool, build outputs, the bundle or
-zip archive and visible serial ports in one place. Add `--require-port` when
-running it as a hard gate on a flashing station.
+zip archive, default fixture connection details and visible serial ports in one
+place. By default it is suitable for stations that only flash an existing zip.
+Add `--require-port`, `--require-idf` or `--require-build` when running those
+checks as hard gates.
+
+With a board connected, identify the ESP32 and flash chip before writing:
+
+```bash
+python3 tools/deploy.py identify --port /dev/tty.usbserial-XXXX --wait-port 60
+```
 
 To flash the bundle and then run the MCP smoke test:
 
