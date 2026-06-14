@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -17,6 +18,7 @@ CORE_TOOLS = {
     "fixture.set_mux_channel",
     "fixture.select_net",
     "fixture.set_runtime_net",
+    "fixture.set_runtime_net_map",
     "fixture.clear_runtime_net",
     "fixture.clear_runtime_net_map",
     "fixture.reset_dut",
@@ -223,6 +225,50 @@ def require_digital_inputs_shape(name: str, payload: dict) -> None:
                 raise RuntimeError(f"{name} reading {index} missing boolean {field}: {reading!r}")
 
 
+def require_runtime_net_map_set_shape(name: str, payload: dict, expected_applied_count: int) -> None:
+    if payload.get("applied_count") != expected_applied_count:
+        raise RuntimeError(f"{name} applied_count mismatch: {json.dumps(payload, ensure_ascii=False)}")
+    if not isinstance(payload.get("runtime_entry_count"), int):
+        raise RuntimeError(f"{name} missing runtime_entry_count: {json.dumps(payload, ensure_ascii=False)}")
+    if payload["runtime_entry_count"] < expected_applied_count:
+        raise RuntimeError(f"{name} runtime_entry_count too small: {json.dumps(payload, ensure_ascii=False)}")
+    if payload.get("persisted") is not True:
+        raise RuntimeError(f"{name} did not report persisted=true: {json.dumps(payload, ensure_ascii=False)}")
+    if not isinstance(payload.get("clear_existing"), bool):
+        raise RuntimeError(f"{name} missing clear_existing boolean: {json.dumps(payload, ensure_ascii=False)}")
+
+
+def find_net_map_entry(net_map: dict, net: str, source: str | None = None) -> dict | None:
+    entries = net_map.get("entries")
+    if not isinstance(entries, list):
+        raise RuntimeError(f"fixture://net-map entries are missing: {json.dumps(net_map, ensure_ascii=False)}")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("net") != net:
+            continue
+        if source is not None and entry.get("source") != source:
+            continue
+        return entry
+    return None
+
+
+def first_selectable_mux_channel(net_map: dict) -> int:
+    entries = net_map.get("entries")
+    if not isinstance(entries, list):
+        raise RuntimeError(f"fixture://net-map entries are missing: {json.dumps(net_map, ensure_ascii=False)}")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        channel = entry.get("mux_channel")
+        if isinstance(channel, int) and entry.get("selectable") is not False:
+            return channel
+    mux_max_channel = net_map.get("mux_max_channel")
+    if isinstance(mux_max_channel, int) and mux_max_channel >= 0:
+        return 0
+    raise RuntimeError(f"fixture://net-map has no selectable MUX channel: {json.dumps(net_map, ensure_ascii=False)}")
+
+
 def resource_text_json(result: dict, expected_uri: str) -> dict:
     contents = result.get("contents")
     if not isinstance(contents, list) or not contents:
@@ -243,12 +289,41 @@ def resource_text_json(result: dict, expected_uri: str) -> dict:
         raise RuntimeError(f"Resource text is not JSON: {text}") from exc
 
 
+def initialize_client(url: str, protocol_version: str, timeout: float, wait_ready: float) -> tuple[McpHttpClient, dict]:
+    if wait_ready < 0:
+        raise RuntimeError("--wait-ready must be zero or positive")
+
+    deadline = time.monotonic() + wait_ready if wait_ready > 0 else None
+    reported_wait = False
+
+    while True:
+        client = McpHttpClient(url, protocol_version, timeout)
+        try:
+            init_result = client.initialize()
+            return client, init_result
+        except RuntimeError as exc:
+            if deadline is None or time.monotonic() >= deadline:
+                raise
+            if not reported_wait:
+                print(f"Waiting up to {wait_ready:g}s for MCP endpoint {url}...", file=sys.stderr)
+                reported_wait = True
+            sleep_for = min(1.0, max(0.1, deadline - time.monotonic()))
+            time.sleep(sleep_for)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke test the ESP32 fixture MCP endpoint.")
     parser.add_argument("--host", default="192.168.4.1", help="ESP32 host or IP address")
     parser.add_argument("--port", type=int, default=80, help="MCP HTTP port")
     parser.add_argument("--endpoint", default="mcp", help="MCP endpoint path without leading slash")
     parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")
+    parser.add_argument(
+        "--wait-ready",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Retry MCP initialize until the endpoint is ready or this timeout expires",
+    )
     parser.add_argument(
         "--protocol-version",
         default="2025-03-26",
@@ -264,14 +339,28 @@ def main() -> int:
         action="store_true",
         help="Call net ADC tools on the first configured net; this changes the MUX selection",
     )
+    parser.add_argument(
+        "--exercise-runtime-net",
+        action="store_true",
+        help="Temporarily persist, select and clear a runtime net mapping; this changes NVS and MUX selection",
+    )
+    parser.add_argument(
+        "--runtime-net-label",
+        default="__SMOKE_RUNTIME_NET__",
+        help="Temporary runtime net label used with --exercise-runtime-net",
+    )
+    parser.add_argument(
+        "--runtime-net-channel",
+        type=int,
+        help="MUX channel used with --exercise-runtime-net; defaults to the first selectable net-map channel",
+    )
     args = parser.parse_args()
 
     endpoint = args.endpoint.strip("/")
     url = f"http://{args.host}:{args.port}/{endpoint}"
-    client = McpHttpClient(url, args.protocol_version, args.timeout)
 
     try:
-        init_result = client.initialize()
+        client, init_result = initialize_client(url, args.protocol_version, args.timeout, args.wait_ready)
         standard_ping = client.request("ping", {})
         tools_result = client.request("tools/list", {})
         tool_names = {tool.get("name") for tool in tools_result.get("tools", []) if isinstance(tool, dict)}
@@ -333,6 +422,11 @@ def main() -> int:
         net_adc_result = None
         net_adc_scan_result = None
         net_adc_series_result = None
+        runtime_set_result = None
+        runtime_select_result = None
+        runtime_clear_result = None
+        runtime_net_map_after_set = None
+        runtime_net_map_after_clear = None
         if not args.skip_adc_tool:
             adc_result = tool_text_json(
                 client.request("tools/call", {"name": "fixture.read_adc_raw", "arguments": {"samples": 1}})
@@ -388,6 +482,91 @@ def main() -> int:
         elif args.exercise_net_adc_tool:
             raise RuntimeError("--exercise-net-adc-tool cannot be used with --skip-adc-tool")
 
+        if args.exercise_runtime_net:
+            runtime_label = args.runtime_net_label
+            if not isinstance(runtime_label, str) or not runtime_label:
+                raise RuntimeError("--runtime-net-label must be a non-empty string")
+            if find_net_map_entry(net_map, runtime_label) is not None:
+                raise RuntimeError(
+                    f"Temporary runtime net label {runtime_label!r} already exists; "
+                    "choose a different --runtime-net-label"
+                )
+            runtime_channel = (
+                args.runtime_net_channel
+                if args.runtime_net_channel is not None
+                else first_selectable_mux_channel(net_map)
+            )
+
+            cleanup_needed = False
+            runtime_error: RuntimeError | None = None
+            try:
+                runtime_set_result = tool_text_json(
+                    client.request(
+                        "tools/call",
+                        {
+                            "name": "fixture.set_runtime_net_map",
+                            "arguments": {
+                                "mappings": [{"net": runtime_label, "channel": runtime_channel}],
+                                "clear_existing": False,
+                            },
+                        },
+                    )
+                )
+                require_ok("fixture.set_runtime_net_map", runtime_set_result)
+                require_runtime_net_map_set_shape("fixture.set_runtime_net_map", runtime_set_result, 1)
+                cleanup_needed = True
+
+                runtime_net_map_after_set = resource_text_json(
+                    client.request("resources/read", {"uri": "fixture://net-map"}),
+                    "fixture://net-map",
+                )
+                require_ok("fixture://net-map after fixture.set_runtime_net_map", runtime_net_map_after_set)
+                runtime_entry = find_net_map_entry(runtime_net_map_after_set, runtime_label, source="runtime")
+                if runtime_entry is None:
+                    raise RuntimeError("fixture.set_runtime_net_map did not appear in fixture://net-map")
+                if runtime_entry.get("mux_channel") != runtime_channel:
+                    raise RuntimeError(f"Runtime net channel mismatch: {runtime_entry!r}")
+
+                runtime_select_result = tool_text_json(
+                    client.request(
+                        "tools/call",
+                        {"name": "fixture.select_net", "arguments": {"net": runtime_label}},
+                    )
+                )
+                require_ok("fixture.select_net runtime", runtime_select_result)
+                if runtime_select_result.get("source") != "runtime":
+                    raise RuntimeError(f"fixture.select_net did not use runtime source: {runtime_select_result!r}")
+                if runtime_select_result.get("mux_channel") != runtime_channel:
+                    raise RuntimeError(f"fixture.select_net channel mismatch: {runtime_select_result!r}")
+            except RuntimeError as exc:
+                runtime_error = exc
+
+            if cleanup_needed:
+                try:
+                    runtime_clear_result = tool_text_json(
+                        client.request(
+                            "tools/call",
+                            {"name": "fixture.clear_runtime_net", "arguments": {"net": runtime_label}},
+                        )
+                    )
+                    require_ok("fixture.clear_runtime_net", runtime_clear_result)
+                    runtime_net_map_after_clear = resource_text_json(
+                        client.request("resources/read", {"uri": "fixture://net-map"}),
+                        "fixture://net-map",
+                    )
+                    require_ok("fixture://net-map after fixture.clear_runtime_net", runtime_net_map_after_clear)
+                    if find_net_map_entry(runtime_net_map_after_clear, runtime_label) is not None:
+                        raise RuntimeError("fixture.clear_runtime_net left the temporary net in fixture://net-map")
+                except RuntimeError as cleanup_exc:
+                    if runtime_error is not None:
+                        raise RuntimeError(
+                            f"{runtime_error}; runtime net cleanup also failed: {cleanup_exc}"
+                        ) from cleanup_exc
+                    raise
+
+            if runtime_error is not None:
+                raise runtime_error
+
     except RuntimeError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
@@ -416,6 +595,16 @@ def main() -> int:
         print(f"Net ADC scan: {json.dumps(net_adc_scan_result, ensure_ascii=False)}")
     if net_adc_series_result is not None:
         print(f"Net ADC series: {json.dumps(net_adc_series_result, ensure_ascii=False)}")
+    if runtime_set_result is not None:
+        print(f"Runtime net set: {json.dumps(runtime_set_result, ensure_ascii=False)}")
+    if runtime_net_map_after_set is not None:
+        print(f"Runtime net map after set: {json.dumps(runtime_net_map_after_set, ensure_ascii=False)}")
+    if runtime_select_result is not None:
+        print(f"Runtime net select: {json.dumps(runtime_select_result, ensure_ascii=False)}")
+    if runtime_clear_result is not None:
+        print(f"Runtime net clear: {json.dumps(runtime_clear_result, ensure_ascii=False)}")
+    if runtime_net_map_after_clear is not None:
+        print(f"Runtime net map after clear: {json.dumps(runtime_net_map_after_clear, ensure_ascii=False)}")
     return 0
 
 

@@ -9,6 +9,7 @@ idf_component_register(
         esp_timer
         esp_wifi
         esp_netif
+        cjson
         nvs_flash
         mcp-c-sdk
 )

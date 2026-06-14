@@ -19,6 +19,7 @@ Default mode is SoftAP so the firmware can be used without a lab router:
 | `fixture.set_mux_channel` | Select an allowlisted MUX channel |
 | `fixture.select_net` | Select a MUX channel by configured net/testpoint label |
 | `fixture.set_runtime_net` | Persistently map a board net/testpoint label to a MUX channel |
+| `fixture.set_runtime_net_map` | Persistently load multiple board net/testpoint mappings |
 | `fixture.clear_runtime_net` | Remove one persisted runtime net/testpoint mapping |
 | `fixture.clear_runtime_net_map` | Remove all persisted runtime net/testpoint mappings |
 | `fixture.reset_dut` | Pulse DUT reset within configured max duration |
@@ -55,13 +56,21 @@ directly.
 
 Verified locally with ESP-IDF v5.4.4 on ESP32 target. The project uses the
 included `partitions.csv` for 4 MB ESP32 modules, giving the factory app a 3 MB
-partition. The current app image is about 0xe7890 bytes, leaving about 70% free
+partition. The current app image is about 0xe9890 bytes, leaving about 70% free
 in that app partition.
 
 To flash:
 
 ```bash
-python3 tools/deploy.py flash-monitor --port /dev/tty.usbserial-XXXX
+python3 tools/deploy.py flash-monitor --port /dev/tty.usbserial-XXXX --wait-port 60
+```
+
+For a clean first bring-up, or before reusing a fixture with a different DUT,
+erase flash before flashing so stale NVS/runtime net mappings cannot affect the
+test:
+
+```bash
+python3 tools/deploy.py flash --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash
 ```
 
 To create a distributable flash bundle:
@@ -69,28 +78,56 @@ To create a distributable flash bundle:
 ```bash
 python3 tools/deploy.py bundle --zip
 python3 tools/deploy.py verify-bundle
+python3 tools/deploy.py verify-bundle --bundle dist/esp32-fixture.zip
 ```
 
-The bundle is written to `dist/esp32-fixture/` and includes `flash_args`,
-`flasher_args.json`, `manifest.json`, SHA-256 hashes and a generated esptool
-command. The verification step checks the manifest, hashes, `flash_args`,
-`flasher_args.json`, MCP config metadata and app image size against the factory
-partition. From inside the bundle directory:
+The bundle is written to `dist/esp32-fixture/`, and `--zip` also creates
+`dist/esp32-fixture.zip`. Both forms include `flash_args`, `flasher_args.json`,
+`manifest.json`, SHA-256 hashes, generated esptool commands and a short README.
+The verification step accepts either the directory or the zip archive, and
+checks the manifest, hashes, `flash_args`, `flasher_args.json`, command files,
+README, MCP config metadata and app image size against the factory partition.
+From inside the bundle directory:
 
 ```bash
 python -m esptool --chip esp32 -b 460800 --before default_reset --after hard_reset write_flash @flash_args
+```
+
+From the source project, you can flash a verified bundle without rebuilding:
+
+```bash
+python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip \
+  --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash
+```
+
+`flash-bundle` requires the current Python environment to provide
+`python -m esptool`. Source the ESP-IDF `export.sh` environment first, or
+install esptool into that Python. `python3 tools/deploy.py doctor` reports the
+active esptool status.
+
+To flash the bundle and then run the MCP smoke test:
+
+```bash
+python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip \
+  --port /dev/tty.usbserial-XXXX --wait-port 60 \
+  --erase-flash --smoke --prompt --wait-ready 30
 ```
 
 For first bring-up, use `provision` so the same command can build, flash and
 optionally run the non-destructive MCP smoke test:
 
 ```bash
-python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --smoke --prompt
+python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash --smoke --prompt --wait-ready 30
 ```
 
 After flashing, connect this computer to the ESP32 SoftAP when prompted. The
 script then runs the MCP lifecycle handshake, `fixture.self_test` and the status
 checks against `http://192.168.4.1/mcp`.
+
+If you omit `--port`, `--wait-port` waits until exactly one candidate ESP32
+serial port is visible. On macOS, matching `/dev/tty.*` entries are collapsed
+when the preferred `/dev/cu.*` callout device exists. If multiple distinct
+serial ports are present, pass `--port` explicitly.
 
 To list candidate serial ports:
 
@@ -136,11 +173,25 @@ GPIO, duplicates another digital input GPIO or label, or enables pull-up and
 pull-down at the same time.
 
 Runtime net mappings let one flashed image adapt to different DUTs. Use
-`fixture.set_runtime_net` to persist a net/testpoint label in NVS. Runtime
-entries are listed first in `fixture://net-map` and override default Kconfig
-entries with the same label. Use `fixture.clear_runtime_net` or
-`fixture.clear_runtime_net_map` before switching fixtures if the previous board
-used different labels.
+`fixture.set_runtime_net` to persist one net/testpoint label in NVS, or
+`fixture.set_runtime_net_map` to load multiple mappings from the Python bench
+server in one call. Runtime entries are listed first in `fixture://net-map` and
+override default Kconfig entries with the same label. Use
+`fixture.clear_runtime_net` or `fixture.clear_runtime_net_map` before switching
+fixtures if the previous board used different labels.
+
+From the host side, a test station can load a DUT-specific runtime net map from
+JSON:
+
+```bash
+python3 tools/deploy.py load-net-map --dry-run --clear-existing \
+  --mappings-json '[{"net":"VIN","channel":0},{"net":"3V3","channel":1}]'
+
+python3 tools/deploy.py load-net-map \
+  --wait-ready 30 \
+  --clear-existing \
+  --mappings-json '[{"net":"VIN","channel":0},{"net":"3V3","channel":1}]'
+```
 
 When ADC calibration is available, ADC tools return both raw fields and
 millivolt fields:
@@ -179,7 +230,7 @@ For Station mode, configure:
 After flashing, connect your computer to the ESP32 SoftAP and run:
 
 ```bash
-python3 tools/deploy.py smoke
+python3 tools/deploy.py smoke --wait-ready 30
 ```
 
 The smoke test performs the MCP lifecycle handshake, lists tools, calls
@@ -189,6 +240,9 @@ scans configured digital inputs and, when ADC support is enabled, performs one
 raw ADC sample. It does not toggle MUX lines, reset the DUT or enable the load
 switch.
 
+`--wait-ready` retries the MCP initialize step while the ESP32 finishes booting
+or while this computer is reconnecting to the fixture SoftAP.
+
 After the fixture wiring is confirmed, add `--exercise-net-adc-tool` to also
 call `fixture.read_net_adc_raw`, `fixture.scan_net_adc` and
 `fixture.sample_net_adc_series`. That action changes the MUX selection.
@@ -196,11 +250,23 @@ call `fixture.read_net_adc_raw`, `fixture.scan_net_adc` and
 For Station mode or a custom endpoint:
 
 ```bash
-python3 tools/deploy.py smoke --host 192.168.1.123 --http-port 80 --endpoint mcp
+python3 tools/deploy.py smoke --host 192.168.1.123 --http-port 80 --endpoint mcp --wait-ready 30
 ```
 
 If you disable ADC support in `menuconfig`, run the smoke test with
 `--skip-adc-tool`.
+
+To verify runtime net/testpoint mapping, NVS persistence and net-based MUX
+selection, run:
+
+```bash
+python3 tools/deploy.py smoke --wait-ready 30 --exercise-runtime-net
+```
+
+This writes a temporary `__SMOKE_RUNTIME_NET__` mapping, confirms it appears in
+`fixture://net-map`, selects it through `fixture.select_net`, and clears it
+before exiting. Use `--runtime-net-channel` or `--runtime-net-label` to override
+the temporary values.
 
 `fixture.self_test` fails closed when the configured MUX max channel cannot be
 represented by the enabled select GPIOs, when an output GPIO is invalid for the
@@ -278,6 +344,17 @@ curl -X POST http://192.168.4.1/mcp \
   -H "MCP-Protocol-Version: 2024-11-05" \
   -H "MCP-Session-Id: <session-id>" \
   -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fixture.set_runtime_net","arguments":{"net":"VIN","channel":0}}}'
+```
+
+Load multiple runtime net/testpoint mappings:
+
+```bash
+curl -X POST http://192.168.4.1/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "MCP-Protocol-Version: 2024-11-05" \
+  -H "MCP-Session-Id: <session-id>" \
+  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"fixture.set_runtime_net_map","arguments":{"clear_existing":true,"mappings":[{"net":"VIN","channel":0},{"net":"3V3","channel":1}]}}}'
 ```
 
 Clear all runtime net/testpoint mappings:

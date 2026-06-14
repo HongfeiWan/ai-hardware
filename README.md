@@ -89,16 +89,36 @@ python3 tools/deploy.py doctor
 python3 tools/deploy.py build
 python3 tools/deploy.py bundle --zip
 python3 tools/deploy.py verify-bundle
-python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --smoke --prompt
+python3 tools/deploy.py verify-bundle --bundle dist/esp32-fixture.zip
+python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash --smoke --prompt --wait-ready 30
+python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash --smoke --prompt --wait-ready 30
 ```
 
-固件使用 4MB ESP32 分区表，factory app 分区为 3MB；构建已用 ESP-IDF v5.4.4 在 ESP32 target 上验证通过，当前 app 约 `0xe7890` 字节，app 分区剩余约 70%。`bundle` 会生成包含 bootloader、partition table、app、`flash_args`、`manifest.json` 和 SHA-256 的烧录包；`verify-bundle` 会交叉检查 manifest、哈希、flash args 和 app 分区尺寸。烧录后连接默认 SoftAP，再运行：
+固件使用 4MB ESP32 分区表，factory app 分区为 3MB；构建已用 ESP-IDF v5.4.4 在 ESP32 target 上验证通过，当前 app 约 `0xe9890` 字节，app 分区剩余约 70%。`bundle` 会生成包含 bootloader、partition table、app、`flash_args`、`manifest.json`、命令文件和 SHA-256 的烧录包；`verify-bundle` 会交叉检查 manifest、哈希、flash args、命令文件、README 和 app 分区尺寸。烧录后连接默认 SoftAP，再运行：
+
+如果只想烧录已经生成并校验过的固件包，不重新 build，可以使用 `flash-bundle`。它支持 `dist/esp32-fixture` 目录和 `dist/esp32-fixture.zip`，会先校验包内容，再按 bundle 里的 `flash_args` 通过 esptool 写入 ESP32。
+烧录前需要当前 Python 环境能运行 `python -m esptool`；source ESP-IDF 的 `export.sh` 会提供这个环境，`doctor` 会显示当前 shell 是否可用。
 
 ```bash
-python3 tools/deploy.py smoke
+python3 tools/deploy.py smoke --wait-ready 30
 ```
 
-第一版工具包括 `fixture.ping`、`fixture.get_status`、`fixture.self_test`、`fixture.set_mux_channel`、`fixture.select_net`、`fixture.set_runtime_net`、`fixture.clear_runtime_net`、`fixture.clear_runtime_net_map`、`fixture.reset_dut`、`fixture.set_load_switch`、`fixture.read_digital_input`、`fixture.scan_digital_inputs`、`fixture.read_adc_raw`、`fixture.read_net_adc_raw`、`fixture.scan_net_adc` 和 `fixture.sample_net_adc_series`。资源包括 `fixture://status`、`fixture://net-map` 和 `fixture://digital-inputs`。ADC 工具会返回 raw 采样值，并在校准可用时返回 ADC 引脚毫伏值和按夹具比例换算后的 `scaled_mv_*`；scan 工具会返回所有已配置网标的快照，series 工具会返回单个网标的短时间序列，runtime net 工具可在不重刷固件的情况下把当前待测板网标映射到 MUX channel，数字输入工具用于读取 PGOOD、FAULT、IRQ、BOOT 等状态脚，供 Python 测试站提取信号特征并调用模型诊断。`fixture.self_test` 会检查输出 GPIO、数字输入 GPIO、MUX 通道可表示性、网标/测试点映射、ADC 初始化、series 限制和 heap 状态。真实接板前请先用 `idf.py menuconfig` 检查 GPIO 映射、数字输入映射、网标映射、MUX 稳定等待时间、ADC 校准/缩放、连续采样上限和动作极性。
+要验证“按当前待测板网标动态映射到 MUX channel”的链路，可在确认夹具空载或接线安全后运行：
+
+```bash
+python3 tools/deploy.py smoke --wait-ready 30 --exercise-runtime-net
+```
+
+Python 测试站也可以直接下发当前 DUT 的 runtime 网标映射：
+
+```bash
+python3 tools/deploy.py load-net-map --dry-run --clear-existing \
+  --mappings-json '[{"net":"VIN","channel":0},{"net":"3V3","channel":1}]'
+python3 tools/deploy.py load-net-map --wait-ready 30 --clear-existing \
+  --mappings-json '[{"net":"VIN","channel":0},{"net":"3V3","channel":1}]'
+```
+
+第一版工具包括 `fixture.ping`、`fixture.get_status`、`fixture.self_test`、`fixture.set_mux_channel`、`fixture.select_net`、`fixture.set_runtime_net`、`fixture.set_runtime_net_map`、`fixture.clear_runtime_net`、`fixture.clear_runtime_net_map`、`fixture.reset_dut`、`fixture.set_load_switch`、`fixture.read_digital_input`、`fixture.scan_digital_inputs`、`fixture.read_adc_raw`、`fixture.read_net_adc_raw`、`fixture.scan_net_adc` 和 `fixture.sample_net_adc_series`。资源包括 `fixture://status`、`fixture://net-map` 和 `fixture://digital-inputs`。ADC 工具会返回 raw 采样值，并在校准可用时返回 ADC 引脚毫伏值和按夹具比例换算后的 `scaled_mv_*`；scan 工具会返回所有已配置网标的快照，series 工具会返回单个网标的短时间序列，runtime net 工具可在不重刷固件的情况下把当前待测板网标映射到 MUX channel，`fixture.set_runtime_net_map` 支持 Python 测试站一次性加载当前 DUT 的多条网标映射，数字输入工具用于读取 PGOOD、FAULT、IRQ、BOOT 等状态脚，供 Python 测试站提取信号特征并调用模型诊断。`fixture.self_test` 会检查输出 GPIO、数字输入 GPIO、MUX 通道可表示性、网标/测试点映射、ADC 初始化、series 限制和 heap 状态。真实接板前请先用 `idf.py menuconfig` 检查 GPIO 映射、数字输入映射、网标映射、MUX 稳定等待时间、ADC 校准/缩放、连续采样上限和动作极性。
 
 ## 核心 MCP 表面
 
