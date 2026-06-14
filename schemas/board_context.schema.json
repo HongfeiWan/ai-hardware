@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hongfeiwan.github.io/ai-hardware/schemas/board_context.schema.json",
+  "title": "AI Hardware Board Context",
+  "type": "object",
+  "required": ["schema_version", "board", "nets", "components", "test_points"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1.0"
+    },
+    "board": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "revision": { "type": "string" },
+        "description": { "type": "string" },
+        "source_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "nets": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/net" }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/component" }
+    },
+    "test_points": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/test_point" }
+    },
+    "rails": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rail" }
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/constraint" }
+    },
+    "notes": { "type": "string" }
+  },
+  "$defs": {
+    "range": {
+      "type": "object",
+      "required": ["min", "max", "unit"],
+      "properties": {
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "unit": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "net": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "domain": {
+          "type": "string",
+          "enum": ["power", "ground", "analog", "digital", "rf", "mixed", "unknown"]
+        },
+        "expected_voltage": { "$ref": "#/$defs/range" },
+        "expected_frequency": { "$ref": "#/$defs/range" },
+        "risk_level": {
+          "type": "string",
+          "enum": ["low", "medium", "high"]
+        },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "pin": {
+      "type": "object",
+      "required": ["name", "net"],
+      "properties": {
+        "name": { "type": "string" },
+        "net": { "type": "string" },
+        "function": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "component": {
+      "type": "object",
+      "required": ["designator", "type", "pins"],
+      "properties": {
+        "designator": { "type": "string" },
+        "type": { "type": "string" },
+        "value": { "type": "string" },
+        "part_number": { "type": "string" },
+        "package": { "type": "string" },
+        "pins": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/pin" }
+        },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "test_point": {
+      "type": "object",
+      "required": ["id", "net"],
+      "properties": {
+        "id": { "type": "string" },
+        "net": { "type": "string" },
+        "label": { "type": "string" },
+        "probe_hint": { "type": "string" },
+        "location": { "type": "string" },
+        "allowed_measurements": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["dc_voltage", "current", "waveform", "logic", "impedance", "thermal"]
+          }
+        },
+        "risk_level": {
+          "type": "string",
+          "enum": ["low", "medium", "high"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "rail": {
+      "type": "object",
+      "required": ["name", "source_net", "output_net"],
+      "properties": {
+        "name": { "type": "string" },
+        "source_net": { "type": "string" },
+        "output_net": { "type": "string" },
+        "nominal_voltage": { "type": "number" },
+        "voltage_unit": { "type": "string", "default": "V" },
+        "current_limit": { "$ref": "#/$defs/range" },
+        "startup_order": { "type": "integer", "minimum": 0 },
+        "enable_net": { "type": "string" },
+        "power_good_net": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "constraint": {
+      "type": "object",
+      "required": ["id", "type", "description"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["voltage_limit", "current_limit", "do_not_drive", "manual_confirmation", "exclusive_channels"]
+        },
+        "targets": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "description": { "type": "string" },
+        "limit": { "$ref": "#/$defs/range" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

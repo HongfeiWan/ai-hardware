@@ -1,0 +1,110 @@
+{
+  "schema_version": "0.1.0",
+  "session_id": "session_usb_power_stage_001",
+  "board_id": "usb_power_stage_demo",
+  "started_at": "2026-06-14T08:00:00Z",
+  "operator": "demo",
+  "observed_symptom": "3V3 rail does not stay up after USB input is applied.",
+  "instruments": [
+    {
+      "id": "psu_ch1",
+      "kind": "psu",
+      "vendor": "generic",
+      "model": "SCPI-PSU",
+      "resource": "TCPIP::192.168.1.50::INSTR",
+      "channels": ["CH1"]
+    },
+    {
+      "id": "scope1",
+      "kind": "oscilloscope",
+      "vendor": "generic",
+      "model": "SCPI-Scope",
+      "resource": "TCPIP::192.168.1.60::INSTR",
+      "channels": ["CH1", "CH2", "CH3", "CH4"]
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m001",
+      "timestamp": "2026-06-14T08:01:00Z",
+      "kind": "current",
+      "target": {
+        "net": "VBUS",
+        "test_point": "TP1"
+      },
+      "instrument_id": "psu_ch1",
+      "settings": {
+        "voltage_V": 5.0,
+        "current_limit_A": 0.18,
+        "output": true
+      },
+      "result": {
+        "input_current_A": 0.18,
+        "current_limited": true
+      },
+      "features": {
+        "startup_current_reaches_limit": true,
+        "limit_time_ms": 36
+      }
+    },
+    {
+      "id": "m002",
+      "timestamp": "2026-06-14T08:02:00Z",
+      "kind": "waveform",
+      "target": {
+        "net": "VOUT_3V3",
+        "test_point": "TP3"
+      },
+      "instrument_id": "scope1",
+      "settings": {
+        "sample_rate_Sa_s": 50000000,
+        "timebase_s": 0.01,
+        "vertical_scale_V": 1.0
+      },
+      "result": {
+        "artifact_id": "artifact_waveform_m002"
+      },
+      "features": {
+        "v_min_V": 0.0,
+        "v_max_V": 1.12,
+        "collapse_period_ms": 42,
+        "settles": false
+      },
+      "artifact_ids": ["artifact_waveform_m002"]
+    }
+  ],
+  "findings": [
+    {
+      "id": "f001",
+      "timestamp": "2026-06-14T08:03:00Z",
+      "summary": "3V3 rail likely enters protection or current limit during startup.",
+      "confidence": 0.68,
+      "severity": "fault",
+      "evidence": [
+        "VBUS supply reaches configured current limit.",
+        "VOUT_3V3 rises only to 1.12 V and collapses periodically."
+      ],
+      "related_nets": ["VBUS", "VOUT_3V3", "SW_NODE"],
+      "related_components": ["U1", "L1", "C3"]
+    }
+  ],
+  "next_actions": [
+    {
+      "type": "measure_net",
+      "net": "SW_NODE",
+      "test_point": "TP2",
+      "instrument_kind": "oscilloscope",
+      "reason": "Check whether the buck converter switches before shutdown.",
+      "risk_level": "high",
+      "requires_confirmation": true
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "artifact_waveform_m002",
+      "kind": "waveform_csv",
+      "uri": "artifacts/session_usb_power_stage_001/m002_vout_3v3.csv",
+      "mime_type": "text/csv"
+    }
+  ]
+}

@@ -1,0 +1,169 @@
+schema_version: 0.1.0
+board:
+  id: usb_power_stage_demo
+  name: USB Power Stage Demo
+  revision: A
+  description: Minimal USB input to 3V3 buck converter example for diagnostic workflow design.
+  source_files:
+    - kicad/demo_usb_power_stage.kicad_sch
+
+nets:
+  - name: GND
+    domain: ground
+    risk_level: low
+  - name: VBUS
+    aliases: [USB_5V]
+    domain: power
+    expected_voltage:
+      min: 4.75
+      max: 5.25
+      unit: V
+    risk_level: medium
+  - name: EN_3V3
+    domain: digital
+    expected_voltage:
+      min: 2.0
+      max: 5.25
+      unit: V
+    risk_level: low
+  - name: SW_NODE
+    domain: mixed
+    expected_frequency:
+      min: 1.8
+      max: 2.4
+      unit: MHz
+    risk_level: high
+    notes: Switching node. Probe with short ground spring.
+  - name: VOUT_3V3
+    aliases: [3V3]
+    domain: power
+    expected_voltage:
+      min: 3.2
+      max: 3.4
+      unit: V
+    risk_level: medium
+  - name: PG_3V3
+    domain: digital
+    expected_voltage:
+      min: 2.4
+      max: 3.4
+      unit: V
+    risk_level: low
+
+components:
+  - designator: J1
+    type: connector
+    value: USB-C
+    pins:
+      - name: VBUS
+        net: VBUS
+        function: input_power
+      - name: GND
+        net: GND
+        function: ground
+  - designator: U1
+    type: buck_converter
+    part_number: TPS62840-like
+    package: SOT563
+    pins:
+      - name: VIN
+        net: VBUS
+        function: power_input
+      - name: EN
+        net: EN_3V3
+        function: enable
+      - name: SW
+        net: SW_NODE
+        function: switching_node
+      - name: VOS
+        net: VOUT_3V3
+        function: feedback
+      - name: PG
+        net: PG_3V3
+        function: power_good
+      - name: GND
+        net: GND
+        function: ground
+  - designator: L1
+    type: inductor
+    value: 2.2uH
+    pins:
+      - name: "1"
+        net: SW_NODE
+      - name: "2"
+        net: VOUT_3V3
+  - designator: C3
+    type: capacitor
+    value: 22uF
+    pins:
+      - name: "1"
+        net: VOUT_3V3
+      - name: "2"
+        net: GND
+
+test_points:
+  - id: TP1
+    net: VBUS
+    label: VBUS input
+    probe_hint: Probe after USB input fuse.
+    allowed_measurements: [dc_voltage, current, waveform]
+    risk_level: medium
+  - id: TP2
+    net: SW_NODE
+    label: Buck switch node
+    probe_hint: Use 10x probe and spring ground. Do not use long ground lead.
+    allowed_measurements: [waveform]
+    risk_level: high
+  - id: TP3
+    net: VOUT_3V3
+    label: 3V3 rail
+    probe_hint: Probe at output capacitor C3.
+    allowed_measurements: [dc_voltage, waveform, impedance]
+    risk_level: medium
+  - id: TP4
+    net: PG_3V3
+    label: 3V3 power good
+    allowed_measurements: [dc_voltage, logic, waveform]
+    risk_level: low
+
+rails:
+  - name: USB_5V
+    source_net: external_psu_ch1
+    output_net: VBUS
+    nominal_voltage: 5.0
+    voltage_unit: V
+    current_limit:
+      min: 0.02
+      max: 0.5
+      unit: A
+    startup_order: 0
+  - name: 3V3_BUCK
+    source_net: VBUS
+    output_net: VOUT_3V3
+    nominal_voltage: 3.3
+    voltage_unit: V
+    current_limit:
+      min: 0.01
+      max: 0.3
+      unit: A
+    startup_order: 1
+    enable_net: EN_3V3
+    power_good_net: PG_3V3
+
+constraints:
+  - id: limit_usb_current
+    type: current_limit
+    targets: [USB_5V]
+    description: Start with a conservative current limit for unknown boards.
+    limit:
+      min: 0.02
+      max: 0.5
+      unit: A
+  - id: do_not_drive_switch_node
+    type: do_not_drive
+    targets: [SW_NODE]
+    description: SW_NODE is measurement-only.
+  - id: confirm_high_risk_probe
+    type: manual_confirmation
+    targets: [SW_NODE]
+    description: Require operator confirmation before probing the switching node.

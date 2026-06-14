@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hongfeiwan.github.io/ai-hardware/schemas/diagnostic_session.schema.json",
+  "title": "AI Hardware Diagnostic Session",
+  "type": "object",
+  "required": ["schema_version", "session_id", "board_id", "started_at", "observed_symptom", "measurements"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1.0"
+    },
+    "session_id": { "type": "string" },
+    "board_id": { "type": "string" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "operator": { "type": "string" },
+    "observed_symptom": { "type": "string" },
+    "instruments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/instrument" }
+    },
+    "measurements": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/measurement" }
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "next_actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/next_action" }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    }
+  },
+  "$defs": {
+    "instrument": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["psu", "oscilloscope", "dmm", "logic_analyzer", "electronic_load", "esp32_fixture", "other"]
+        },
+        "vendor": { "type": "string" },
+        "model": { "type": "string" },
+        "resource": { "type": "string" },
+        "channels": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "measurement": {
+      "type": "object",
+      "required": ["id", "timestamp", "kind", "target"],
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "kind": {
+          "type": "string",
+          "enum": ["dc_voltage", "current", "waveform", "logic", "impedance", "thermal", "fixture_state"]
+        },
+        "target": {
+          "type": "object",
+          "required": ["net"],
+          "properties": {
+            "net": { "type": "string" },
+            "component": { "type": "string" },
+            "pin": { "type": "string" },
+            "test_point": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "instrument_id": { "type": "string" },
+        "settings": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "artifact_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "finding": {
+      "type": "object",
+      "required": ["id", "timestamp", "summary", "confidence"],
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "summary": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "warning", "fault", "critical"]
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "related_nets": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "related_components": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "next_action": {
+      "type": "object",
+      "required": ["type", "reason", "risk_level"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["measure_net", "probe_pin", "change_power_state", "set_fixture_state", "inspect_component", "ask_human", "stop"]
+        },
+        "net": { "type": "string" },
+        "component": { "type": "string" },
+        "pin": { "type": "string" },
+        "test_point": { "type": "string" },
+        "instrument_kind": { "type": "string" },
+        "reason": { "type": "string" },
+        "risk_level": {
+          "type": "string",
+          "enum": ["low", "medium", "high"]
+        },
+        "requires_confirmation": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["id", "kind", "uri"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["waveform_csv", "waveform_binary", "scope_screenshot", "log", "image", "report", "other"]
+        },
+        "uri": { "type": "string" },
+        "mime_type": { "type": "string" },
+        "sha256": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
