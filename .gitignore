@@ -2,5 +2,6 @@ firmware/esp32-fixture/build/
 firmware/esp32-fixture/dist/
 firmware/esp32-fixture/managed_components/
 firmware/esp32-fixture/sdkconfig
+artifacts/
 __pycache__/
 *.py[cod]

@@ -124,6 +124,32 @@ python3 tools/deploy.py load-net-map --wait-ready 30 --clear-existing \
 
 第一版工具包括 `fixture.ping`、`fixture.get_status`、`fixture.self_test`、`fixture.set_mux_channel`、`fixture.select_net`、`fixture.set_runtime_net`、`fixture.set_runtime_net_map`、`fixture.clear_runtime_net`、`fixture.clear_runtime_net_map`、`fixture.reset_dut`、`fixture.set_load_switch`、`fixture.read_digital_input`、`fixture.scan_digital_inputs`、`fixture.read_adc_raw`、`fixture.read_net_adc_raw`、`fixture.scan_net_adc` 和 `fixture.sample_net_adc_series`。资源包括 `fixture://status`、`fixture://net-map` 和 `fixture://digital-inputs`。ADC 工具会返回 raw 采样值，并在校准可用时返回 ADC 引脚毫伏值和按夹具比例换算后的 `scaled_mv_*`；scan 工具会返回所有已配置网标的快照，series 工具会返回单个网标的短时间序列，runtime net 工具可在不重刷固件的情况下把当前待测板网标映射到 MUX channel，`fixture.set_runtime_net_map` 支持 Python 测试站一次性加载当前 DUT 的多条网标映射，数字输入工具用于读取 PGOOD、FAULT、IRQ、BOOT 等状态脚，供 Python 测试站提取信号特征并调用模型诊断。`fixture.self_test` 会检查输出 GPIO、数字输入 GPIO、MUX 通道可表示性、网标/测试点映射、ADC 初始化、series 限制和 heap 状态。真实接板前请先用 `idf.py menuconfig` 检查 GPIO 映射、数字输入映射、网标映射、MUX 稳定等待时间、ADC 校准/缩放、连续采样上限和动作极性。
 
+## Python Bench 原型
+
+Python 测试站原型在 [bench/ai_hardware_bench](bench/ai_hardware_bench)。这一层不依赖 ESP32 实机，也不强制安装 `mcp`、`fastmcp`、`yaml` 或 `jsonschema`；当前实现用标准库完成板级文件加载、轻量校验、拓扑查询、mock PSU、mock scope、mock fixture、波形特征提取、规则诊断和 MCP-shaped stdio JSON-RPC 入口。
+
+常用命令：
+
+```bash
+python3 tools/bench.py validate-board examples/boards/usb_power_stage.yaml
+python3 tools/bench.py demo \
+  --board examples/boards/usb_power_stage.yaml \
+  --output-session artifacts/mock-bench/session.json
+python3 tools/bench.py call-tool list_nets \
+  --board examples/boards/usb_power_stage.yaml \
+  --arguments '{"domain":"power"}'
+python3 tools/bench.py serve --board examples/boards/usb_power_stage.yaml
+```
+
+首批 bench 工具覆盖 `load_board_context`、`list_nets`、`trace_net_neighbors`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux` 和 `esp32_reset_dut`。`demo` 会生成 mock 波形 CSV、session JSON、诊断 finding 和下一步测量建议；后续接入真实仪器时，可以保留工具契约，把 mock driver 替换为 PyVISA/SCPI driver。
+
+本机无硬件检查：
+
+```bash
+PYTHONPATH=bench python3 -m unittest discover -s tests
+python3 -m py_compile $(rg --files -g '*.py')
+```
+
 ## 核心 MCP 表面
 
 第一阶段建议暴露这些能力：

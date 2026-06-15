@@ -1,0 +1,16 @@
+[project]
+name = "ai-hardware"
+version = "0.1.0"
+description = "AI-assisted hardware diagnostic bench and ESP32 fixture prototypes"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "bench"}
+
+[tool.setuptools.packages.find]
+where = ["bench"]
+
+[tool.pytest.ini_options]
+pythonpath = ["bench"]
+
