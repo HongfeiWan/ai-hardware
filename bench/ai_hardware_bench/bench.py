@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .data import BoardContext, DiagnosticSession, load_board_context, utc_now
-from .instruments import MockFixture, MockPsu, MockScope, extract_waveform_features
+from .instruments import MockFixture, build_psu_driver, build_scope_driver, extract_waveform_features
 from .topology import Topology
 
 
@@ -19,16 +19,22 @@ ToolFunc = Callable[..., dict[str, Any]]
 class BenchApp:
     """A dependency-free bench prototype with MCP-shaped tools."""
 
-    def __init__(self, artifact_dir: str | Path = "artifacts/mock-bench") -> None:
+    def __init__(
+        self,
+        artifact_dir: str | Path = "artifacts/mock-bench",
+        instrument_config: dict[str, Any] | str | Path | None = None,
+    ) -> None:
         self.artifact_dir = Path(artifact_dir)
         self.board: BoardContext | None = None
         self.topology: Topology | None = None
         self.session: DiagnosticSession | None = None
-        self.psu = MockPsu()
-        self.scope = MockScope()
+        config = _load_instrument_config(instrument_config)
+        self.psu = build_psu_driver(config.get("psu"))
+        self.scope = build_scope_driver(config.get("scope"))
         self.fixture = MockFixture()
         self.tools: dict[str, ToolFunc] = {
             "load_board_context": self.load_board_context_tool,
+            "instrument_status": self.instrument_status,
             "list_nets": self.list_nets,
             "trace_net_neighbors": self.trace_net_neighbors,
             "set_power_rail": self.set_power_rail,
@@ -82,6 +88,16 @@ class BenchApp:
             "session_id": self.session.session_id,
         }
 
+    def instrument_status(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "instruments": [
+                self.psu.status(),
+                self.scope.status(),
+                {"id": "mock_fixture", "kind": "esp32_fixture", "backend": "mock"},
+            ],
+        }
+
     def list_nets(self, domain: str | None = None, risk_level: str | None = None) -> dict[str, Any]:
         nets = self.require_topology().list_nets(domain=domain, risk_level=risk_level)
         return {"ok": True, "nets": nets, "count": len(nets)}
@@ -126,7 +142,7 @@ class BenchApp:
             "timestamp": utc_now(),
             "kind": "current",
             "target": {"net": rail_info["output_net"]},
-            "instrument_id": "mock_psu_ch1",
+            "instrument_id": self.psu.id,
             "settings": {
                 "rail": rail,
                 "voltage_V": voltage_V,
@@ -178,7 +194,7 @@ class BenchApp:
             "timestamp": utc_now(),
             "kind": "waveform",
             "target": {"net": net_name, "test_point": point.get("id")},
-            "instrument_id": "mock_scope",
+            "instrument_id": self.scope.id,
             "settings": {
                 "sample_count": captured["sample_count"],
                 "duration_s": captured["duration_s"],
@@ -297,6 +313,7 @@ class BenchApp:
             {"name": name, "description": description}
             for name, description in {
                 "load_board_context": "Load and validate a board context file.",
+                "instrument_status": "Report configured bench instrument backends.",
                 "list_nets": "List nets with optional domain/risk filters.",
                 "trace_net_neighbors": "Trace component, rail and test point neighbors for a net.",
                 "set_power_rail": "Safety-check and mock a programmable PSU rail action.",
@@ -473,6 +490,19 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _load_instrument_config(config: dict[str, Any] | str | Path | None) -> dict[str, Any]:
+    if config is None:
+        return {}
+    if isinstance(config, dict):
+        return config
+    path = Path(config)
+    with path.open("r", encoding="utf-8") as handle:
+        loaded = json.load(handle)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Instrument config must be a JSON object: {path}")
+    return loaded
+
+
 def to_mcp_tool_result(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "content": [
@@ -483,4 +513,3 @@ def to_mcp_tool_result(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "isError": not payload.get("ok", False),
     }
-
