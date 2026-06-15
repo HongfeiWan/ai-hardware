@@ -30,6 +30,7 @@ class ConsoleState:
         self.suite_path = str(suite_path) if suite_path else None
         self.last_demo: dict[str, Any] | None = None
         self.last_regression: dict[str, Any] | None = None
+        self.last_plan: dict[str, Any] | None = None
 
 
 def create_console_server(
@@ -81,6 +82,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.console_state.last_regression = result
             self._send_json(result)
             return
+        if parsed.path == "/api/plan":
+            payload = self._read_json_body()
+            result = self._plan_initial_measurements(payload)
+            self.console_state.last_plan = result
+            self._send_json(result)
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -104,19 +111,36 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             },
             "instruments": app.instrument_status()["instruments"],
             "model": app.model_status()["model"],
+            "last_plan": _compact_last(self.console_state.last_plan),
             "last_demo": _compact_last(self.console_state.last_demo),
             "last_regression": _compact_last(self.console_state.last_regression),
         }
 
     def _board_payload(self) -> dict[str, Any]:
-        board = load_board_context(self.console_state.board_path)
+        app = BenchApp(self.console_state.artifact_dir / "board")
+        app.load_board_context_tool(self.console_state.board_path, observed_symptom=self.console_state.symptom)
+        board = app.require_board()
         return {
             "ok": True,
             "board": board.data["board"],
-            "nets": list(board.nets.values()),
+            "nets": app.list_nets()["nets"],
             "rails": list(board.rails.values()),
             "test_points": list(board.test_points.values()),
+            "power_paths": [
+                app.trace_power_path(rail["output_net"])
+                for rail in sorted(board.rails.values(), key=lambda item: (item.get("startup_order", 999), item["name"]))
+            ],
         }
+
+    def _plan_initial_measurements(self, payload: dict[str, Any]) -> dict[str, Any]:
+        app = BenchApp(self.console_state.artifact_dir / "plan")
+        app.load_board_context_tool(self.console_state.board_path, observed_symptom=self.console_state.symptom)
+        arguments = {
+            "max_actions": int(payload.get("max_actions", 8)),
+            "risk_ceiling": str(payload.get("risk_ceiling", "medium")),
+            "include_power_off": bool(payload.get("include_power_off", True)),
+        }
+        return app.call_tool("plan_initial_measurements", arguments)
 
     def _run_demo(self, symptom: str) -> dict[str, Any]:
         demo_dir = self.console_state.artifact_dir / "demo"
@@ -287,9 +311,19 @@ def render_console_html(state: ConsoleState) -> str:
       overflow: auto;
     }}
     .toolbar {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
+    .split {{ display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, .9fr); gap: 16px; align-items: start; }}
+    .table-wrap {{ overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }}
+    table {{ width: 100%; border-collapse: collapse; min-width: 620px; }}
+    th, td {{ padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }}
+    th {{ background: #eef3f2; color: #22313a; font-weight: 700; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .pill {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; background: var(--accent-weak); color: #07564f; font-size: 12px; }}
+    .pill.warn {{ background: #fff7ed; color: var(--warn); }}
+    .pill.bad {{ background: #fee2e2; color: var(--bad); }}
     .muted {{ color: var(--muted); }}
     .ok {{ color: var(--accent); font-weight: 700; }}
     .bad {{ color: var(--bad); font-weight: 700; }}
+    @media (max-width: 860px) {{ .split {{ grid-template-columns: 1fr; }} header {{ align-items: flex-start; flex-direction: column; }} }}
   </style>
 </head>
 <body>
@@ -300,6 +334,7 @@ def render_console_html(state: ConsoleState) -> str:
     </div>
     <div class="toolbar">
       <button id="refresh">Refresh</button>
+      <button id="plan">Plan First Checks</button>
       <button id="run-demo">Run Demo</button>
       <button id="run-regression" class="secondary">Run Regression</button>
     </div>
@@ -309,9 +344,19 @@ def render_console_html(state: ConsoleState) -> str:
       <h2>Status</h2>
       <div id="status" class="grid"></div>
     </section>
+    <div class="split">
+      <section>
+        <h2>Initial Plan</h2>
+        <div id="plan-table" class="table-wrap"></div>
+      </section>
+      <section>
+        <h2>Symptom</h2>
+        <textarea id="symptom">{escape(state.symptom)}</textarea>
+      </section>
+    </div>
     <section>
-      <h2>Symptom</h2>
-      <textarea id="symptom">{escape(state.symptom)}</textarea>
+      <h2>Board Topology</h2>
+      <div id="topology" class="table-wrap"></div>
     </section>
     <section>
       <h2>Result</h2>
@@ -321,12 +366,29 @@ def render_console_html(state: ConsoleState) -> str:
   </main>
   <script>
     const statusEl = document.getElementById('status');
+    const topologyEl = document.getElementById('topology');
+    const planTableEl = document.getElementById('plan-table');
     const outputEl = document.getElementById('output');
     const linksEl = document.getElementById('links');
     const symptomEl = document.getElementById('symptom');
 
     function show(data) {{
       outputEl.textContent = JSON.stringify(data, null, 2);
+    }}
+
+    function escapeHtml(value) {{
+      return String(value ?? '').replace(/[&<>"']/g, char => ({{
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }}[char]));
+    }}
+
+    function riskPill(risk) {{
+      const cls = risk === 'high' ? 'bad' : risk === 'medium' ? 'warn' : '';
+      return `<span class="pill ${{cls}}">${{escapeHtml(risk || 'low')}}</span>`;
     }}
 
     function setLinks(data) {{
@@ -340,9 +402,51 @@ def render_console_html(state: ConsoleState) -> str:
       }}
     }}
 
+    function renderPlan(actions) {{
+      if (!actions || actions.length === 0) {{
+        planTableEl.innerHTML = '<div class="metric"><span>No plan yet</span><strong>Run Plan First Checks</strong></div>';
+        return;
+      }}
+      planTableEl.innerHTML = `<table>
+        <thead><tr><th>Step</th><th>Action</th><th>Target</th><th>Instrument</th><th>Risk</th><th>Reason</th></tr></thead>
+        <tbody>${{actions.map((action, index) => `
+          <tr>
+            <td>${{index + 1}}</td>
+            <td>${{escapeHtml(action.measurement_kind || action.type)}}</td>
+            <td><code>${{escapeHtml(action.net || action.rail || '')}}</code>${{action.test_point ? ` / <code>${{escapeHtml(action.test_point)}}</code>` : ''}}</td>
+            <td>${{escapeHtml(action.instrument_kind || 'bench')}}</td>
+            <td>${{riskPill(action.risk_level)}}</td>
+            <td>${{escapeHtml(action.reason)}}</td>
+          </tr>`).join('')}}</tbody>
+      </table>`;
+    }}
+
+    function renderTopology(board) {{
+      const pointByNet = {{}};
+      for (const point of board.test_points || []) {{
+        if (!pointByNet[point.net]) pointByNet[point.net] = [];
+        pointByNet[point.net].push(point.id);
+      }}
+      topologyEl.innerHTML = `<table>
+        <thead><tr><th>Net</th><th>Domain</th><th>Risk</th><th>Expected</th><th>Test Points</th></tr></thead>
+        <tbody>${{(board.nets || []).map(net => {{
+          const expected = net.expected_voltage ? `${{net.expected_voltage.min}}-${{net.expected_voltage.max}} ${{net.expected_voltage.unit || 'V'}}` :
+            net.expected_frequency ? `${{net.expected_frequency.min}}-${{net.expected_frequency.max}} ${{net.expected_frequency.unit || 'Hz'}}` : '';
+          return `<tr>
+            <td><code>${{escapeHtml(net.name)}}</code></td>
+            <td>${{escapeHtml(net.domain || 'unknown')}}</td>
+            <td>${{riskPill(net.risk_level)}}</td>
+            <td>${{escapeHtml(expected)}}</td>
+            <td>${{escapeHtml((pointByNet[net.name] || []).join(', '))}}</td>
+          </tr>`;
+        }}).join('')}}</tbody>
+      </table>`;
+    }}
+
     async function refresh() {{
-      const response = await fetch('/api/status');
-      const data = await response.json();
+      const [statusResponse, boardResponse] = await Promise.all([fetch('/api/status'), fetch('/api/board')]);
+      const data = await statusResponse.json();
+      const board = await boardResponse.json();
       statusEl.innerHTML = [
         ['Board', data.board.id],
         ['Nets', data.board.nets],
@@ -351,7 +455,21 @@ def render_console_html(state: ConsoleState) -> str:
         ['Rails', data.board.rails],
         ['Model', data.model.backend]
       ].map(([label, value]) => `<div class="metric"><span>${{label}}</span><strong>${{value}}</strong></div>`).join('');
+      renderTopology(board);
       show(data);
+    }}
+
+    async function runPlan() {{
+      const response = await fetch('/api/plan', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ max_actions: 8, risk_ceiling: 'medium', include_power_off: true }})
+      }});
+      const data = await response.json();
+      renderPlan(data.next_actions || []);
+      setLinks({{}});
+      show(data);
+      await refresh();
     }}
 
     async function runDemo() {{
@@ -375,6 +493,7 @@ def render_console_html(state: ConsoleState) -> str:
     }}
 
     document.getElementById('refresh').addEventListener('click', refresh);
+    document.getElementById('plan').addEventListener('click', runPlan);
     document.getElementById('run-demo').addEventListener('click', runDemo);
     document.getElementById('run-regression').addEventListener('click', runRegression);
     refresh();
@@ -395,4 +514,3 @@ def _compact_last(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         "failed": payload.get("failed"),
         "count": payload.get("count"),
     }
-

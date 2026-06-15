@@ -152,10 +152,12 @@ python3 tools/bench.py check --output artifacts/check/result.json
 python3 tools/bench.py call-tool list_nets \
   --board examples/boards/usb_power_stage.yaml \
   --arguments '{"domain":"power"}'
+python3 tools/bench.py call-tool plan_initial_measurements \
+  --board examples/boards/usb_power_stage.yaml
 python3 tools/bench.py serve --board examples/boards/usb_power_stage.yaml
 ```
 
-首批 bench 工具覆盖 `load_board_context`、`instrument_status`、`model_status`、`safety_status`、`validate_session`、`read_audit_log`、`list_nets`、`trace_net_neighbors`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux` 和 `esp32_reset_dut`。`demo` 会生成 mock 波形 CSV、session JSON、诊断 finding、下一步测量建议和 JSONL 审计日志。
+首批 bench 工具覆盖 `load_board_context`、`instrument_status`、`model_status`、`safety_status`、`validate_session`、`read_audit_log`、`plan_initial_measurements`、`list_nets`、`trace_net_neighbors`、`find_test_points`、`trace_power_path`、`list_downstream_loads`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux` 和 `esp32_reset_dut`。`demo` 会生成 mock 波形 CSV、session JSON、诊断 finding、下一步测量建议和 JSONL 审计日志。
 
 stdio MCP server 支持 `tools/list`、`tools/call`、`resources/list`、`resources/read`、`prompts/list` 和 `prompts/get`。资源包括 `board://context/{board_id}`、`board://topology/{board_id}`、`board://net/{board_id}/{net_name}`、`session://measurements/{session_id}` 和 `session://artifacts/{session_id}/{artifact_id}`；文本 artifact（例如 waveform CSV）会以内联文本返回。当前 prompts 包括 `diagnose_power_rail`、`diagnose_boot_sequence` 和 `plan_next_measurement`，会把已加载的 board/session/topology/measurement 摘要整理成可发给模型的结构化提示。
 
@@ -167,9 +169,26 @@ python3 tools/bench.py call-tool capture_waveform \
   --arguments '{"net":"SW_NODE","confirm":true}'
 ```
 
+拓扑查询：
+
+```bash
+python3 tools/bench.py call-tool find_test_points \
+  --board examples/boards/usb_power_stage.yaml \
+  --arguments '{"net":"VOUT_3V3","measurement":"waveform"}'
+python3 tools/bench.py call-tool trace_power_path \
+  --board examples/boards/usb_power_stage.yaml \
+  --arguments '{"net":"VOUT_3V3"}'
+python3 tools/bench.py call-tool list_downstream_loads \
+  --board examples/boards/usb_power_stage.yaml \
+  --arguments '{"rail":"3V3_BUCK","depth":1}'
+```
+
 审计和 session 校验：
 
 ```bash
+python3 tools/bench.py call-tool plan_initial_measurements \
+  --board examples/boards/usb_power_stage.yaml \
+  --arguments '{"max_actions":6,"risk_ceiling":"medium"}'
 python3 tools/bench.py call-tool safety_status --board examples/boards/usb_power_stage.yaml
 python3 tools/bench.py call-tool read_audit_log --board examples/boards/usb_power_stage.yaml
 python3 tools/bench.py validate-session artifacts/mock-bench/session.json
@@ -224,7 +243,7 @@ python3 tools/bench.py call-tool instrument_status \
   --instrument-config instruments.local.json
 ```
 
-模型适配默认使用本地规则引擎。要接本地或私有模型网关，可以使用通用 HTTP JSON adapter；该 endpoint 收到 board/session/topology JSON，并返回 `finding` 和 `next_actions`。
+模型适配默认使用本地规则引擎。要接本地或私有模型网关，可以使用通用 HTTP JSON adapter；该 endpoint 收到 board/session/topology JSON，并返回 `finding` 和 `next_actions`。返回内容会在写入 session 前按诊断 session 合约校验：`finding` 需要 `id`、`timestamp`、`summary`、`confidence`，`next_actions` 需要合法 `type`、`reason`、`risk_level`；引用的 net、test point、component 必须存在，高风险 net 的建议动作必须带 `requires_confirmation: true`。
 
 ```json
 {
@@ -256,7 +275,7 @@ python3 tools/bench.py check --output artifacts/check/result.json
 第一阶段建议暴露这些能力：
 
 - Resources：`board://context/{board_id}`、`board://topology/{board_id}`、`session://measurements/{session_id}`。
-- Tools：`load_board_context`、`list_nets`、`trace_net_neighbors`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux`、`esp32_reset_dut`。
+- Tools：`load_board_context`、`plan_initial_measurements`、`list_nets`、`trace_net_neighbors`、`find_test_points`、`trace_power_path`、`list_downstream_loads`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux`、`esp32_reset_dut`。
 - Prompts：`diagnose_power_rail`、`diagnose_boot_sequence`、`plan_next_measurement`。
 
 ## 安全原则

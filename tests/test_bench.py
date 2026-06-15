@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +12,7 @@ from ai_hardware_bench.bench import BenchApp
 from ai_hardware_bench.data import load_board_context
 from ai_hardware_bench.importers import import_board
 from ai_hardware_bench.mcp_server import StdioJsonRpcServer
+from ai_hardware_bench.model import ModelOutputValidationError
 from ai_hardware_bench.regression import run_regression_suite
 from ai_hardware_bench.report import generate_session_report
 from ai_hardware_bench.web import create_console_server
@@ -128,11 +130,106 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertEqual(status["instruments"][0]["backend"], "mock")
         self.assertEqual(status["instruments"][1]["backend"], "mock")
 
+    def test_plan_initial_measurements_writes_low_risk_actions(self) -> None:
+        app = BenchApp()
+        app.load_board_context_tool(str(BOARD))
+        result = app.call_tool("plan_initial_measurements", {"max_actions": 6})
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["count"], 4)
+        self.assertEqual(app.session.data["next_actions"], result["next_actions"])
+        self.assertEqual(result["next_actions"][0]["measurement_kind"], "impedance")
+        action_nets = {action.get("net") for action in result["next_actions"]}
+        self.assertIn("VOUT_3V3", action_nets)
+        self.assertIn("PG_3V3", action_nets)
+        self.assertNotIn("SW_NODE", action_nets)
+        self.assertTrue(all(action["risk_level"] in {"low", "medium"} for action in result["next_actions"]))
+
+    def test_topology_tools_find_power_path_and_test_points(self) -> None:
+        app = BenchApp()
+        app.load_board_context_tool(str(BOARD))
+        points = app.call_tool("find_test_points", {"net": "VOUT_3V3", "measurement": "waveform"})
+        self.assertTrue(points["ok"])
+        self.assertEqual(points["test_points"][0]["id"], "TP3")
+
+        path = app.call_tool("trace_power_path", {"net": "VOUT_3V3"})
+        self.assertTrue(path["ok"])
+        self.assertEqual(path["paths"][0]["rails"][-1]["name"], "3V3_BUCK")
+
+        loads = app.call_tool("list_downstream_loads", {"rail": "3V3_BUCK", "depth": 1})
+        self.assertTrue(loads["ok"])
+        designators = {load["component"]["designator"] for load in loads["loads"]}
+        self.assertIn("U1", designators)
+
     def test_model_status_defaults_to_rules(self) -> None:
         app = BenchApp()
         status = app.model_status()
         self.assertTrue(status["ok"])
         self.assertEqual(status["model"]["backend"], "rules")
+
+    def test_json_http_model_output_is_validated_and_saved(self) -> None:
+        payload = {
+            "finding": {
+                "id": "finding_http_001",
+                "timestamp": "2026-06-15T00:00:00Z",
+                "summary": "HTTP model identified no hard fault.",
+                "confidence": 0.44,
+                "severity": "info",
+                "evidence": ["Synthetic model response was accepted."],
+                "related_nets": ["VOUT_3V3"],
+                "related_components": ["U1"],
+            },
+            "next_actions": [
+                {
+                    "type": "measure_net",
+                    "net": "VOUT_3V3",
+                    "test_point": "TP3",
+                    "instrument_kind": "oscilloscope",
+                    "reason": "Capture the rail waveform before changing conditions.",
+                    "risk_level": "low",
+                    "requires_confirmation": False,
+                }
+            ],
+        }
+        server, thread, endpoint = start_json_model_server(payload)
+        try:
+            app = BenchApp(model_config={"backend": "json_http", "endpoint": endpoint})
+            app.load_board_context_tool(str(BOARD))
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertTrue(result["ok"])
+            self.assertEqual(app.session.data["findings"][0]["id"], "finding_http_001")
+            self.assertEqual(app.session.data["next_actions"][0]["test_point"], "TP3")
+        finally:
+            stop_server(server, thread)
+
+    def test_json_http_model_rejects_invalid_output(self) -> None:
+        payload = {
+            "finding": {
+                "id": "finding_bad",
+                "timestamp": "2026-06-15T00:00:00Z",
+                "summary": "Bad model output.",
+                "confidence": 2.0,
+            },
+            "next_actions": [
+                {
+                    "type": "measure_net",
+                    "net": "SW_NODE",
+                    "reason": "Missing confirmation on a high-risk net.",
+                    "risk_level": "high",
+                    "requires_confirmation": False,
+                }
+            ],
+        }
+        server, thread, endpoint = start_json_model_server(payload)
+        try:
+            app = BenchApp(model_config={"backend": "json_http", "endpoint": endpoint})
+            app.load_board_context_tool(str(BOARD))
+            with self.assertRaises(ModelOutputValidationError):
+                app.call_tool("diagnose_hardware", {})
+            self.assertEqual(app.session.data["findings"], [])
+            audit = app.read_audit_log()
+            self.assertEqual(audit["events"][-1]["outcome"], "error")
+        finally:
+            stop_server(server, thread)
 
     def test_high_risk_capture_requires_confirmation_and_audits_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,6 +348,35 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertEqual(board.board_id, "kicad_demo")
             self.assertIn("VIN", board.nets)
             self.assertEqual(board.test_points["TP1"]["net"], "VIN")
+
+class JsonModelHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(content_length)
+        payload = json.dumps(self.server.payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def start_json_model_server(payload: dict[str, object]) -> tuple[HTTPServer, threading.Thread, str]:
+    server = HTTPServer(("127.0.0.1", 0), JsonModelHandler)
+    server.payload = payload
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    return server, thread, f"http://{host}:{port}/model"
+
+
+def stop_server(server: HTTPServer, thread: threading.Thread) -> None:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
 
 
 if __name__ == "__main__":

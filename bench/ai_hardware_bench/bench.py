@@ -48,8 +48,12 @@ class BenchApp:
             "safety_status": self.safety_status,
             "validate_session": self.validate_session_tool,
             "read_audit_log": self.read_audit_log,
+            "plan_initial_measurements": self.plan_initial_measurements,
             "list_nets": self.list_nets,
             "trace_net_neighbors": self.trace_net_neighbors,
+            "find_test_points": self.find_test_points,
+            "trace_power_path": self.trace_power_path,
+            "list_downstream_loads": self.list_downstream_loads,
             "set_power_rail": self.set_power_rail,
             "capture_waveform": self.capture_waveform,
             "extract_signal_features": self.extract_signal_features,
@@ -128,6 +132,116 @@ class BenchApp:
         events = self.audit.read(limit=limit)
         return {"ok": True, "events": events, "count": len(events)}
 
+    def plan_initial_measurements(
+        self,
+        max_actions: int = 8,
+        risk_ceiling: str = "medium",
+        include_power_off: bool = True,
+    ) -> dict[str, Any]:
+        board = self.require_board()
+        session = self.require_session()
+        risk_order = {"low": 0, "medium": 1, "high": 2}
+        if risk_ceiling not in risk_order:
+            raise ValueError("risk_ceiling must be low, medium or high")
+        limit = max(1, min(int(max_actions), 20))
+        actions: list[dict[str, Any]] = []
+        seen: set[tuple[str, str | None, str | None]] = set()
+
+        def within_risk(net: str) -> bool:
+            risk = board.nets[net].get("risk_level", "low")
+            return risk_order.get(risk, 0) <= risk_order[risk_ceiling]
+
+        def add(action: dict[str, Any]) -> None:
+            if len(actions) >= limit:
+                return
+            key = (str(action.get("type")), action.get("net"), action.get("measurement_kind"))
+            if key in seen:
+                return
+            seen.add(key)
+            actions.append(action)
+
+        rails = sorted(board.rails.values(), key=lambda rail: (rail.get("startup_order", 999), rail["name"]))
+        if include_power_off:
+            for rail in rails:
+                output_net = rail["output_net"]
+                if output_net in board.nets and within_risk(output_net):
+                    point = self._resolve_test_point(output_net, None, "impedance", required=False)
+                    if point:
+                        add(
+                            {
+                                "type": "measure_net",
+                                "net": output_net,
+                                "test_point": point["id"],
+                                "instrument_kind": "dmm",
+                                "measurement_kind": "impedance",
+                                "power_state": "off",
+                                "reason": "Check rail-to-ground impedance before applying power.",
+                                "risk_level": board.nets[output_net].get("risk_level", "low"),
+                                "requires_confirmation": False,
+                            }
+                        )
+
+        for rail in rails:
+            output_net = rail["output_net"]
+            if output_net in board.nets and rail.get("source_net") not in board.nets and within_risk(output_net):
+                current_limit = _conservative_current_limit(rail)
+                add(
+                    {
+                        "type": "change_power_state",
+                        "rail": rail["name"],
+                        "net": output_net,
+                        "voltage_V": float(rail.get("nominal_voltage", 0.0)),
+                        "current_limit_A": current_limit,
+                        "output": True,
+                        "reason": "Apply the primary input rail with a conservative current limit.",
+                        "risk_level": board.nets[output_net].get("risk_level", "low"),
+                        "requires_confirmation": False,
+                    }
+                )
+
+        for rail in rails:
+            for net_key, reason in (
+                ("output_net", "Measure rail DC voltage after conservative power-up."),
+                ("enable_net", "Confirm the rail enable signal is in the expected state."),
+                ("power_good_net", "Check the rail power-good status before deeper probing."),
+            ):
+                net = rail.get(net_key)
+                if not net or net not in board.nets or not within_risk(net):
+                    continue
+                point = self._resolve_test_point(net, None, "dc_voltage", required=False)
+                add(
+                    {
+                        "type": "measure_net",
+                        "net": net,
+                        "test_point": point.get("id") if point else None,
+                        "instrument_kind": "dmm",
+                        "measurement_kind": "dc_voltage",
+                        "reason": reason,
+                        "risk_level": board.nets[net].get("risk_level", "low"),
+                        "requires_confirmation": False,
+                    }
+                )
+
+        if not actions:
+            for point in sorted(board.test_points.values(), key=lambda item: item["id"]):
+                net = point["net"]
+                if within_risk(net):
+                    add(
+                        {
+                            "type": "measure_net",
+                            "net": net,
+                            "test_point": point["id"],
+                            "instrument_kind": "dmm",
+                            "measurement_kind": "dc_voltage",
+                            "reason": "Collect a low-risk voltage check before deeper probing.",
+                            "risk_level": board.nets[net].get("risk_level", "low"),
+                            "requires_confirmation": False,
+                        }
+                    )
+
+        session.set_next_actions(actions)
+        return {"ok": True, "next_actions": actions, "count": len(actions), "risk_ceiling": risk_ceiling}
+
     def list_nets(self, domain: str | None = None, risk_level: str | None = None) -> dict[str, Any]:
         nets = self.require_topology().list_nets(domain=domain, risk_level=risk_level)
         return {"ok": True, "nets": nets, "count": len(nets)}
@@ -135,6 +249,26 @@ class BenchApp:
     def trace_net_neighbors(self, net: str, depth: int = 1) -> dict[str, Any]:
         trace = self.require_topology().trace_net_neighbors(net, depth=depth)
         return {"ok": True, **trace}
+
+    def find_test_points(
+        self,
+        net: str | None = None,
+        measurement: str | None = None,
+        risk_level: str | None = None,
+    ) -> dict[str, Any]:
+        points = self.require_topology().find_test_points(net=net, measurement=measurement, risk_level=risk_level)
+        return {"ok": True, "test_points": points, "count": len(points)}
+
+    def trace_power_path(self, net: str) -> dict[str, Any]:
+        return {"ok": True, **self.require_topology().trace_power_path(net)}
+
+    def list_downstream_loads(
+        self,
+        rail: str | None = None,
+        net: str | None = None,
+        depth: int = 2,
+    ) -> dict[str, Any]:
+        return {"ok": True, **self.require_topology().list_downstream_loads(rail=rail, net=net, depth=depth)}
 
     def set_power_rail(
         self,
@@ -361,8 +495,12 @@ class BenchApp:
                 "safety_status": "Report safety policy and audit log location.",
                 "validate_session": "Validate the current or saved diagnostic session.",
                 "read_audit_log": "Read recent JSONL audit events.",
+                "plan_initial_measurements": "Plan a low-risk first measurement sequence.",
                 "list_nets": "List nets with optional domain/risk filters.",
                 "trace_net_neighbors": "Trace component, rail and test point neighbors for a net.",
+                "find_test_points": "Find test points by net, measurement kind or risk level.",
+                "trace_power_path": "Trace upstream rails feeding a target net.",
+                "list_downstream_loads": "List nearby downstream load components for a rail or net.",
                 "set_power_rail": "Safety-check and mock a programmable PSU rail action.",
                 "capture_waveform": "Capture a synthetic mock waveform and write a CSV artifact.",
                 "extract_signal_features": "Extract basic voltage features from a waveform CSV.",
@@ -562,6 +700,15 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _conservative_current_limit(rail: dict[str, Any]) -> float:
+    limit = rail.get("current_limit")
+    if not isinstance(limit, dict):
+        return 0.05
+    minimum = float(limit.get("min", 0.01))
+    maximum = float(limit.get("max", 0.05))
+    return round(max(minimum, min(maximum, 0.1)), 6)
 
 
 def _load_instrument_config(config: dict[str, Any] | str | Path | None) -> dict[str, Any]:

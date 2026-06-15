@@ -11,6 +11,23 @@ from .data import BoardContext, DiagnosticSession, utc_now
 from .topology import Topology
 
 
+FINDING_SEVERITIES = {"info", "warning", "fault", "critical"}
+NEXT_ACTION_TYPES = {
+    "measure_net",
+    "probe_pin",
+    "change_power_state",
+    "set_fixture_state",
+    "inspect_component",
+    "ask_human",
+    "stop",
+}
+RISK_LEVELS = {"low", "medium", "high"}
+
+
+class ModelOutputValidationError(ValueError):
+    """Raised when a model endpoint returns data outside the session schema."""
+
+
 class ModelAdapter(Protocol):
     id: str
 
@@ -79,7 +96,7 @@ class RuleBasedModelAdapter:
             "related_nets": sorted(related_nets | set(low_voltage_rails) | {action_net}),
             "related_components": [item["designator"] for item in topology.components_on_net(action_net)],
         }
-        return {"finding": finding, "next_actions": [action]}
+        return validate_model_output({"finding": finding, "next_actions": [action]}, board)
 
     def status(self) -> dict[str, Any]:
         return {"id": self.id, "backend": "rules", "requires_network": False}
@@ -120,7 +137,7 @@ class JsonHttpModelAdapter:
         actions = payload.get("next_actions")
         if not isinstance(finding, dict) or not isinstance(actions, list):
             raise RuntimeError("Model endpoint must return finding and next_actions")
-        return {"finding": finding, "next_actions": actions}
+        return validate_model_output({"finding": finding, "next_actions": actions}, board)
 
     def status(self) -> dict[str, Any]:
         return {"id": self.id, "backend": "json_http", "endpoint": self.endpoint, "requires_network": True}
@@ -138,10 +155,109 @@ def build_model_adapter(config: dict[str, Any] | None) -> ModelAdapter:
     raise ValueError(f"Unsupported model backend: {config.get('backend')}")
 
 
+def validate_model_output(payload: dict[str, Any], board: BoardContext) -> dict[str, Any]:
+    """Validate the model response against the diagnostic session contract."""
+
+    errors = validate_model_output_errors(payload, board)
+    if errors:
+        raise ModelOutputValidationError("Invalid model output: " + "; ".join(errors))
+    return payload
+
+
+def validate_model_output_errors(payload: dict[str, Any], board: BoardContext) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return ["model output must be an object"]
+    finding = payload.get("finding")
+    if not isinstance(finding, dict):
+        errors.append("finding must be an object")
+    else:
+        _validate_finding(finding, errors, board)
+    actions = payload.get("next_actions")
+    if not isinstance(actions, list):
+        errors.append("next_actions must be a list")
+    else:
+        for index, action in enumerate(actions):
+            if not isinstance(action, dict):
+                errors.append(f"next_actions[{index}] must be an object")
+                continue
+            _validate_next_action(action, errors, board, f"next_actions[{index}]")
+    return errors
+
+
+def _validate_finding(finding: dict[str, Any], errors: list[str], board: BoardContext) -> None:
+    for field in ("id", "timestamp", "summary"):
+        _require_non_empty_string(finding, field, errors, "finding")
+    confidence = finding.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or confidence < 0 or confidence > 1:
+        errors.append("finding.confidence must be a number between 0 and 1")
+    severity = finding.get("severity")
+    if severity is not None and severity not in FINDING_SEVERITIES:
+        errors.append(f"finding.severity must be one of {sorted(FINDING_SEVERITIES)}")
+    _validate_string_list(finding, "evidence", errors, "finding")
+    _validate_string_list(finding, "related_nets", errors, "finding")
+    for net in finding.get("related_nets", []) or []:
+        if isinstance(net, str) and net not in board.nets and net not in board.aliases:
+            errors.append(f"finding.related_nets references unknown net {net}")
+    _validate_string_list(finding, "related_components", errors, "finding")
+    for component in finding.get("related_components", []) or []:
+        if isinstance(component, str) and component not in board.components:
+            errors.append(f"finding.related_components references unknown component {component}")
+
+
+def _validate_next_action(action: dict[str, Any], errors: list[str], board: BoardContext, prefix: str) -> None:
+    action_type = action.get("type")
+    if action_type not in NEXT_ACTION_TYPES:
+        errors.append(f"{prefix}.type must be one of {sorted(NEXT_ACTION_TYPES)}")
+    _require_non_empty_string(action, "reason", errors, prefix)
+    risk_level = action.get("risk_level")
+    if risk_level not in RISK_LEVELS:
+        errors.append(f"{prefix}.risk_level must be one of {sorted(RISK_LEVELS)}")
+    requires_confirmation = action.get("requires_confirmation")
+    if requires_confirmation is not None and not isinstance(requires_confirmation, bool):
+        errors.append(f"{prefix}.requires_confirmation must be a boolean")
+    net_name = action.get("net")
+    canonical_net = None
+    if net_name is not None:
+        if not isinstance(net_name, str) or not net_name:
+            errors.append(f"{prefix}.net must be a non-empty string")
+        else:
+            try:
+                canonical_net = board.canonical_net(net_name)
+            except ValueError:
+                errors.append(f"{prefix}.net references unknown net {net_name}")
+    test_point = action.get("test_point")
+    if test_point is not None:
+        if not isinstance(test_point, str) or not test_point:
+            errors.append(f"{prefix}.test_point must be a non-empty string")
+        elif test_point not in board.test_points:
+            errors.append(f"{prefix}.test_point references unknown test point {test_point}")
+        elif canonical_net and board.test_points[test_point].get("net") != canonical_net:
+            errors.append(f"{prefix}.test_point {test_point} is not on net {canonical_net}")
+    component = action.get("component")
+    if component is not None and component not in board.components:
+        errors.append(f"{prefix}.component references unknown component {component}")
+    if canonical_net and board.nets[canonical_net].get("risk_level") == "high" and requires_confirmation is not True:
+        errors.append(f"{prefix} targets high-risk net {canonical_net} without requires_confirmation=true")
+
+
+def _require_non_empty_string(obj: dict[str, Any], field: str, errors: list[str], prefix: str) -> None:
+    value = obj.get(field)
+    if not isinstance(value, str) or not value:
+        errors.append(f"{prefix}.{field} must be a non-empty string")
+
+
+def _validate_string_list(obj: dict[str, Any], field: str, errors: list[str], prefix: str) -> None:
+    value = obj.get(field)
+    if value is None:
+        return
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        errors.append(f"{prefix}.{field} must be a list of strings")
+
+
 def _first_point_for(board: BoardContext, net: str, measurement: str) -> dict[str, Any] | None:
     for point in board.test_points.values():
         allowed = point.get("allowed_measurements") or []
         if point["net"] == net and (measurement in allowed or not allowed):
             return point
     return None
-

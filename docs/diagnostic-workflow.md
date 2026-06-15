@@ -7,7 +7,7 @@
 1. 加载 `board_context`，校验 schema。
 2. 输入故障现象，例如“3V3 不启动”“USB 枚举失败”“某路电源纹波过大”。
 3. 根据网标和拓扑找到相关电源轨、IC 引脚、测试点和上下游器件。
-4. 生成低风险首轮测量计划，例如不上电电阻、限流上电、关键 rail DC 电压。
+4. 生成低风险首轮测量计划，例如不上电电阻、限流上电、关键 rail DC 电压；Python Bench 中对应 `plan_initial_measurements`。
 5. Python 工具执行仪器动作，保存原始数据引用和结构化特征。
 6. 模型读取板级上下文、测量特征和历史记录，输出诊断或下一步测量。
 7. 工具层校验下一步动作是否在安全边界内。
@@ -29,25 +29,35 @@
 
 ```json
 {
-  "diagnosis": "3V3 rail is likely current-limited during startup",
-  "confidence": 0.72,
-  "evidence": [
-    "VOUT_3V3 ramps to 1.1 V then collapses every 42 ms",
-    "Input current reaches the configured 180 mA limit",
-    "EN_3V3 remains high during the collapse"
-  ],
-  "next_measurements": [
+  "finding": {
+    "id": "finding_001",
+    "timestamp": "2026-06-15T00:00:00Z",
+    "summary": "3V3 rail is likely current-limited during startup",
+    "confidence": 0.72,
+    "severity": "fault",
+    "evidence": [
+      "VOUT_3V3 ramps to 1.1 V then collapses every 42 ms",
+      "Input current reaches the configured 180 mA limit",
+      "EN_3V3 remains high during the collapse"
+    ],
+    "related_nets": ["VOUT_3V3", "SW_NODE"],
+    "related_components": ["U1"]
+  },
+  "next_actions": [
     {
       "type": "measure_net",
       "net": "SW_NODE",
-      "instrument": "oscilloscope",
+      "instrument_kind": "oscilloscope",
       "reason": "Check whether the buck converter is switching before shutdown",
-      "risk_level": "medium"
+      "risk_level": "high",
+      "requires_confirmation": true
     }
   ],
   "stop_reason": null
 }
 ```
+
+Python Bench 会在模型输出写入 session 前做轻量校验：`finding` 必须满足诊断 session 的必填字段，`next_actions` 的动作类型和风险等级必须在 allowlist 中，引用的网标、测试点和器件必须能在当前 `board_context` 中解析。高风险网标的建议动作必须显式要求人工确认。
 
 ## 停止条件
 
