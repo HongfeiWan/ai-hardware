@@ -123,6 +123,45 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertEqual(content["mimeType"], "text/csv")
             self.assertIn("t_s,voltage_V", content["text"])
 
+    def test_scope_screenshot_artifact_report_and_resource(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session_path = Path(tmp) / "session.json"
+            report_path = Path(tmp) / "report.html"
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="capture screenshot")
+            waveform = app.call_tool("capture_waveform", {"net": "VOUT_3V3", "sample_count": 64})
+            screenshot = app.call_tool(
+                "capture_scope_screenshot",
+                {"net": "VOUT_3V3", "artifact_id": waveform["artifact"]["id"]},
+            )
+            self.assertTrue(screenshot["ok"])
+            self.assertEqual(screenshot["artifact"]["kind"], "scope_screenshot")
+            self.assertEqual(screenshot["artifact"]["mime_type"], "image/svg+xml")
+            self.assertTrue(Path(screenshot["artifact"]["uri"]).exists())
+
+            saved = app.save_session(session_path)
+            self.assertTrue(saved["ok"], saved["validation_errors"])
+            report = generate_session_report(session_path, report_path, audit_path=Path(tmp) / "artifacts" / "audit.jsonl")
+            self.assertTrue(report["ok"])
+            html = report_path.read_text(encoding="utf-8")
+            self.assertIn("scope_screenshot", html)
+            self.assertIn("data:image/svg+xml;base64", html)
+
+            server = StdioJsonRpcServer(app)
+            artifact_uri = f"session://artifacts/{app.session.session_id}/{screenshot['artifact']['id']}"
+            read_artifact = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "resources/read",
+                    "params": {"uri": artifact_uri},
+                }
+            )
+            self.assertIsNotNone(read_artifact)
+            content = read_artifact["result"]["contents"][0]
+            self.assertEqual(content["mimeType"], "image/svg+xml")
+            self.assertIn("<svg", content["text"])
+
     def test_instrument_status_defaults_to_mock(self) -> None:
         app = BenchApp()
         status = app.instrument_status()
@@ -165,6 +204,26 @@ class BenchPrototypeTest(unittest.TestCase):
         status = app.model_status()
         self.assertTrue(status["ok"])
         self.assertEqual(status["model"]["backend"], "rules")
+
+    def test_rule_model_detects_overvoltage_and_stops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="3V3 rail overvoltage exceeds the configured maximum")
+            app.call_tool("capture_waveform", {"net": "VOUT_3V3", "sample_count": 64})
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "critical")
+            self.assertIn("above", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "stop")
+
+    def test_rule_model_detects_excessive_ripple(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="3V3 rail ripple appears excessive")
+            app.call_tool("capture_waveform", {"net": "VOUT_3V3", "sample_count": 128})
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "warning")
+            self.assertIn("ripple", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["net"], "SW_NODE")
 
     def test_json_http_model_output_is_validated_and_saved(self) -> None:
         payload = {
@@ -255,8 +314,8 @@ class BenchPrototypeTest(unittest.TestCase):
             suite = ROOT / "examples" / "regressions" / "usb_power_stage.json"
             result = run_regression_suite(suite, Path(tmp) / "regression")
             self.assertTrue(result["ok"], result)
-            self.assertEqual(result["count"], 2)
-            self.assertEqual(result["passed"], 2)
+            self.assertEqual(result["count"], 3)
+            self.assertEqual(result["passed"], 3)
 
     def test_html_report_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

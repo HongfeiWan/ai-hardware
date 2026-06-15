@@ -43,7 +43,13 @@ class SafetyPolicy:
         "suggest_next_probe",
     }
 
-    SIDE_EFFECT_TOOLS = {"set_power_rail", "capture_waveform", "esp32_set_mux", "esp32_reset_dut"}
+    SIDE_EFFECT_TOOLS = {
+        "set_power_rail",
+        "capture_waveform",
+        "capture_scope_screenshot",
+        "esp32_set_mux",
+        "esp32_reset_dut",
+    }
 
     def evaluate(self, tool_name: str, arguments: dict[str, Any], board: BoardContext | None) -> SafetyDecision:
         confirm = bool(arguments.get("confirm", False))
@@ -66,7 +72,7 @@ class SafetyPolicy:
             if board and isinstance(rail, str) and rail in board.rails:
                 output_net = board.rails[rail].get("output_net")
                 risk = _max_risk(risk, _net_risk(board, output_net))
-        elif tool_name == "capture_waveform":
+        elif tool_name in {"capture_waveform", "capture_scope_screenshot"}:
             if board:
                 net_name = _argument_net(arguments, board)
                 risk = _max_risk(risk, _net_risk(board, net_name))
@@ -76,7 +82,7 @@ class SafetyPolicy:
                 if _requires_manual_confirmation(board, net_name):
                     reasons.append(f"{net_name} is covered by a manual_confirmation constraint")
             if risk == "high":
-                reasons.append("High-risk waveform capture requires confirmation")
+                reasons.append(f"High-risk {tool_name} requires confirmation")
         elif tool_name in {"esp32_set_mux", "esp32_reset_dut"}:
             if not bool(arguments.get("dry_run", True)):
                 reasons.append(f"Non-dry-run {tool_name} requires confirmation")

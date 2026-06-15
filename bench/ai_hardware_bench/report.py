@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from html import escape
 import json
 from pathlib import Path
@@ -227,18 +228,20 @@ def _load_audit(path: str | Path | None) -> list[dict[str, Any]]:
 
 
 def _artifact_preview(artifact: dict[str, Any], base_dir: Path | None) -> str:
-    if artifact.get("kind") != "waveform_csv":
-        return ""
     path = _resolve_artifact_path(str(artifact.get("uri", "")), base_dir)
     if path is None:
         return "<span class=\"muted\">missing</span>"
-    try:
-        samples = _read_waveform_csv(path)
-    except Exception:
-        return "<span class=\"muted\">unreadable</span>"
-    if not samples:
-        return "<span class=\"muted\">empty</span>"
-    return _waveform_svg(samples)
+    if artifact.get("kind") == "waveform_csv":
+        try:
+            samples = _read_waveform_csv(path)
+        except Exception:
+            return "<span class=\"muted\">unreadable</span>"
+        if not samples:
+            return "<span class=\"muted\">empty</span>"
+        return _waveform_svg(samples)
+    if artifact.get("kind") == "scope_screenshot":
+        return _image_preview(path, str(artifact.get("mime_type", "application/octet-stream")))
+    return ""
 
 
 def _resolve_artifact_path(uri: str, base_dir: Path | None) -> Path | None:
@@ -294,4 +297,16 @@ def _waveform_svg(samples: list[tuple[float, float]]) -> str:
         f"<polyline points=\"{' '.join(points)}\" fill=\"none\" stroke=\"#0f766e\" stroke-width=\"2\"/>"
         f"<text x=\"6\" y=\"58\" font-size=\"10\" fill=\"#5d6875\">{v_min:.3g}..{v_max:.3g} V</text>"
         "</svg>"
+    )
+
+
+def _image_preview(path: Path, mime_type: str) -> str:
+    try:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    except Exception:
+        return "<span class=\"muted\">unreadable</span>"
+    safe_mime = escape(mime_type)
+    return (
+        f"<img src=\"data:{safe_mime};base64,{encoded}\" alt=\"Scope screenshot\" "
+        "style=\"max-width:240px;max-height:160px;border:1px solid #d7dde5;border-radius:6px;background:#0b1118\"/>"
     )

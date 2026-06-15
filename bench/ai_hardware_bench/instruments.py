@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
 from math import pi, sin
 from pathlib import Path
 from typing import Any, Protocol
@@ -28,6 +29,14 @@ class ScopeDriver(Protocol):
         symptom: str,
         sample_count: int,
         duration_s: float,
+        artifact_path: Path,
+    ) -> dict[str, Any]:
+        ...
+
+    def capture_screenshot(
+        self,
+        net: str,
+        features: dict[str, Any] | None,
         artifact_path: Path,
     ) -> dict[str, Any]:
         ...
@@ -115,6 +124,22 @@ class MockScope:
     def status(self) -> dict[str, Any]:
         return {"id": self.id, "kind": "oscilloscope", "backend": "mock"}
 
+    def capture_screenshot(
+        self,
+        net: str,
+        features: dict[str, Any] | None,
+        artifact_path: Path,
+    ) -> dict[str, Any]:
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        svg = _mock_scope_screenshot_svg(net, features or {})
+        artifact_path.write_text(svg, encoding="utf-8")
+        return {
+            "artifact_path": artifact_path,
+            "mime_type": "image/svg+xml",
+            "width_px": 640,
+            "height_px": 360,
+        }
+
     def _synthesize(
         self,
         net: str,
@@ -192,6 +217,10 @@ class ScpiConnection:
         values = self.instrument.query_ascii_values(command)
         return [float(value) for value in values]
 
+    def query_raw_bytes(self, command: str) -> bytes:
+        self.instrument.write(command)
+        return bytes(self.instrument.read_raw())
+
 
 @dataclass
 class ScpiPsu:
@@ -246,6 +275,7 @@ class ScpiScope:
     waveform_points_command: str = "WAVeform:POINts {points}"
     waveform_data_query: str = "WAVeform:DATA?"
     sample_interval_s: float | None = None
+    screenshot_command: str = "DISPlay:DATA? PNG"
 
     def __post_init__(self) -> None:
         self.connection = ScpiConnection(self.resource, self.timeout_ms)
@@ -287,6 +317,24 @@ class ScpiScope:
             "channel": self.channel,
         }
 
+    def capture_screenshot(
+        self,
+        net: str,
+        features: dict[str, Any] | None,
+        artifact_path: Path,
+    ) -> dict[str, Any]:
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        data = self.connection.query_raw_bytes(self.screenshot_command)
+        if not data:
+            raise RuntimeError("SCPI scope returned no screenshot data")
+        artifact_path.write_bytes(data)
+        return {
+            "artifact_path": artifact_path,
+            "mime_type": "image/png",
+            "width_px": None,
+            "height_px": None,
+        }
+
 
 def build_psu_driver(config: dict[str, Any] | None) -> PsuDriver:
     if not config or config.get("backend", "mock") == "mock":
@@ -322,3 +370,31 @@ def _safe_float_query(connection: ScpiConnection, query: str) -> float | None:
         return float(connection.query(query))
     except Exception:
         return None
+
+
+def _mock_scope_screenshot_svg(net: str, features: dict[str, Any]) -> str:
+    width = 640
+    height = 360
+    grid = []
+    for x in range(40, width, 80):
+        grid.append(f'<line x1="{x}" y1="40" x2="{x}" y2="310" stroke="#203040" stroke-width="1"/>')
+    for y in range(40, 320, 54):
+        grid.append(f'<line x1="40" y1="{y}" x2="600" y2="{y}" stroke="#203040" stroke-width="1"/>')
+    v_avg = float(features.get("v_avg_V", 1.0) or 1.0)
+    v_pp = float(features.get("v_pp_V", 0.2) or 0.2)
+    points = []
+    for index in range(160):
+        phase = index / 159
+        x = 40 + phase * 560
+        y = 175 - 70 * (0.55 * sin(2 * pi * 2.8 * phase) + 0.15 * sin(2 * pi * 17 * phase))
+        points.append(f"{x:.1f},{y:.1f}")
+    safe_net = escape(net)
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">'
+        '<rect width="640" height="360" fill="#0b1118"/>'
+        + "".join(grid)
+        + f'<polyline points="{" ".join(points)}" fill="none" stroke="#33d17a" stroke-width="3"/>'
+        f'<text x="40" y="28" fill="#e5edf5" font-family="Menlo, monospace" font-size="18">Mock Scope - {safe_net}</text>'
+        f'<text x="40" y="338" fill="#9fb0c0" font-family="Menlo, monospace" font-size="14">avg={v_avg:.4g} V  vpp={v_pp:.4g} V</text>'
+        '</svg>'
+    )

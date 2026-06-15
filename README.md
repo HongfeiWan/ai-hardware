@@ -157,7 +157,7 @@ python3 tools/bench.py call-tool plan_initial_measurements \
 python3 tools/bench.py serve --board examples/boards/usb_power_stage.yaml
 ```
 
-首批 bench 工具覆盖 `load_board_context`、`instrument_status`、`model_status`、`safety_status`、`validate_session`、`read_audit_log`、`plan_initial_measurements`、`list_nets`、`trace_net_neighbors`、`find_test_points`、`trace_power_path`、`list_downstream_loads`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux` 和 `esp32_reset_dut`。`demo` 会生成 mock 波形 CSV、session JSON、诊断 finding、下一步测量建议和 JSONL 审计日志。
+首批 bench 工具覆盖 `load_board_context`、`instrument_status`、`model_status`、`safety_status`、`validate_session`、`read_audit_log`、`plan_initial_measurements`、`list_nets`、`trace_net_neighbors`、`find_test_points`、`trace_power_path`、`list_downstream_loads`、`set_power_rail`、`capture_waveform`、`capture_scope_screenshot`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux` 和 `esp32_reset_dut`。`demo` 会生成 mock 波形 CSV、session JSON、诊断 finding、下一步测量建议和 JSONL 审计日志。
 
 stdio MCP server 支持 `tools/list`、`tools/call`、`resources/list`、`resources/read`、`prompts/list` 和 `prompts/get`。资源包括 `board://context/{board_id}`、`board://topology/{board_id}`、`board://net/{board_id}/{net_name}`、`session://measurements/{session_id}` 和 `session://artifacts/{session_id}/{artifact_id}`；文本 artifact（例如 waveform CSV）会以内联文本返回。当前 prompts 包括 `diagnose_power_rail`、`diagnose_boot_sequence` 和 `plan_next_measurement`，会把已加载的 board/session/topology/measurement 摘要整理成可发给模型的结构化提示。
 
@@ -167,6 +167,9 @@ stdio MCP server 支持 `tools/list`、`tools/call`、`resources/list`、`resour
 python3 tools/bench.py call-tool capture_waveform \
   --board examples/boards/usb_power_stage.yaml \
   --arguments '{"net":"SW_NODE","confirm":true}'
+python3 tools/bench.py call-tool capture_scope_screenshot \
+  --board examples/boards/usb_power_stage.yaml \
+  --arguments '{"net":"VOUT_3V3"}'
 ```
 
 拓扑查询：
@@ -194,7 +197,7 @@ python3 tools/bench.py call-tool read_audit_log --board examples/boards/usb_powe
 python3 tools/bench.py validate-session artifacts/mock-bench/session.json
 ```
 
-可回归诊断任务集放在 [examples/regressions](examples/regressions)。`run-regression --suite` 会逐个运行任务、保存 session/artifact/audit，并检查预期 severity、summary 片段和下一步测量网标。`report` 会把 session 和 audit 汇总成一个静态 HTML 报告，便于回看诊断证据、测量特征、artifact 引用、波形 CSV 预览和工具调用记录。
+可回归诊断任务集放在 [examples/regressions](examples/regressions)。`run-regression --suite` 会逐个运行任务、保存 session/artifact/audit，并检查预期 severity、summary 片段、下一步测量网标或动作类型。当前 USB 电源链路样板覆盖 3V3 输出塌陷、输出纹波过大和输出过压停机。`report` 会把 session 和 audit 汇总成一个静态 HTML 报告，便于回看诊断证据、测量特征、artifact 引用、波形 CSV 预览和工具调用记录。
 
 `console` 会启动一个仅绑定本机的轻量 Web 控制台，默认地址是 `http://127.0.0.1:8766`。控制台可以查看当前板卡摘要、仪器/model 状态、net/test point 拓扑表，生成首轮低风险测量计划，运行 mock demo 或 regression，回放最近 demo 的波形 CSV artifact，并打开生成的 HTML 报告。它只依赖 Python 标准库，适合先作为 notebook/Web 控制台之前的本地工程台面。
 
@@ -218,7 +221,7 @@ python3 tools/bench.py import-board \
   --name "Imported KiCad Board"
 ```
 
-默认 driver 是 mock；要试接真实 SCPI 仪器，可以传一个 JSON 配置。没有安装 PyVISA 或 VISA backend 时，只有显式启用 SCPI 才会报错，mock 流程不受影响。
+默认 driver 是 mock；要试接真实 SCPI 仪器，可以传一个 JSON 配置。没有安装 PyVISA 或 VISA backend 时，只有显式启用 SCPI 才会报错，mock 流程不受影响。mock scope 会保存 CSV 波形和 SVG 截图 artifact；SCPI scope 路径会用 `WAVeform:DATA?` 采集 CSV，并预留 `DISPlay:DATA? PNG` 硬拷贝截图命令。
 
 ```json
 {
@@ -275,7 +278,7 @@ python3 tools/bench.py check --output artifacts/check/result.json
 第一阶段建议暴露这些能力：
 
 - Resources：`board://context/{board_id}`、`board://topology/{board_id}`、`session://measurements/{session_id}`。
-- Tools：`load_board_context`、`plan_initial_measurements`、`list_nets`、`trace_net_neighbors`、`find_test_points`、`trace_power_path`、`list_downstream_loads`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux`、`esp32_reset_dut`。
+- Tools：`load_board_context`、`plan_initial_measurements`、`list_nets`、`trace_net_neighbors`、`find_test_points`、`trace_power_path`、`list_downstream_loads`、`set_power_rail`、`capture_waveform`、`capture_scope_screenshot`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux`、`esp32_reset_dut`。
 - Prompts：`diagnose_power_rail`、`diagnose_boot_sequence`、`plan_next_measurement`。
 
 ## 安全原则

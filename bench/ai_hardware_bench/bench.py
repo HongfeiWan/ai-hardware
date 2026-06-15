@@ -56,6 +56,7 @@ class BenchApp:
             "list_downstream_loads": self.list_downstream_loads,
             "set_power_rail": self.set_power_rail,
             "capture_waveform": self.capture_waveform,
+            "capture_scope_screenshot": self.capture_scope_screenshot,
             "extract_signal_features": self.extract_signal_features,
             "diagnose_hardware": self.diagnose_hardware,
             "suggest_next_probe": self.suggest_next_probe,
@@ -393,6 +394,68 @@ class BenchApp:
         features = extract_waveform_features(samples)
         return {"ok": True, "features": features, "sample_count": len(samples), "artifact_id": artifact_id}
 
+    def capture_scope_screenshot(
+        self,
+        net: str,
+        artifact_id: str | None = None,
+    ) -> dict[str, Any]:
+        board = self.require_board()
+        session = self.require_session()
+        net_name = board.canonical_net(net)
+        measurement = None
+        features = None
+        if artifact_id:
+            measurement = next(
+                (
+                    item
+                    for item in session.data["measurements"]
+                    if artifact_id in (item.get("artifact_ids") or [])
+                ),
+                None,
+            )
+            if measurement is None:
+                raise ValueError(f"Unknown waveform artifact_id: {artifact_id}")
+            features = measurement.get("features")
+        else:
+            measurement = next(
+                (
+                    item
+                    for item in reversed(session.data["measurements"])
+                    if item.get("kind") == "waveform" and item.get("target", {}).get("net") == net_name
+                ),
+                None,
+            )
+            features = measurement.get("features") if measurement else None
+        screenshot_artifact_id = f"artifact_{self._next_measurement_id()}_{net_name.lower()}_scope"
+        screenshot_suffix = ".svg" if self.scope.status().get("backend") == "mock" else ".png"
+        screenshot_path = self.artifact_dir / session.session_id / f"{screenshot_artifact_id}{screenshot_suffix}"
+        captured = self.scope.capture_screenshot(net_name, features, screenshot_path)
+        artifact = {
+            "id": screenshot_artifact_id,
+            "kind": "scope_screenshot",
+            "uri": str(captured["artifact_path"]),
+            "mime_type": captured.get("mime_type", "image/svg+xml"),
+            "sha256": _sha256_file(Path(captured["artifact_path"])),
+        }
+        session.add_artifact(artifact)
+        shot_measurement = {
+            "id": self._next_measurement_id(),
+            "timestamp": utc_now(),
+            "kind": "waveform",
+            "target": {"net": net_name, "test_point": (measurement or {}).get("target", {}).get("test_point")},
+            "instrument_id": self.scope.id,
+            "settings": {"capture_type": "scope_screenshot", "source_artifact_id": artifact_id},
+            "result": {
+                "artifact_id": screenshot_artifact_id,
+                "width_px": captured.get("width_px"),
+                "height_px": captured.get("height_px"),
+            },
+            "features": features or {},
+            "artifact_ids": [screenshot_artifact_id],
+        }
+        session.add_measurement(shot_measurement)
+        return {"ok": True, "measurement": shot_measurement, "artifact": artifact}
+
     def diagnose_hardware(self) -> dict[str, Any]:
         board = self.require_board()
         session = self.require_session()
@@ -503,6 +566,7 @@ class BenchApp:
                 "list_downstream_loads": "List nearby downstream load components for a rail or net.",
                 "set_power_rail": "Safety-check and mock a programmable PSU rail action.",
                 "capture_waveform": "Capture a synthetic mock waveform and write a CSV artifact.",
+                "capture_scope_screenshot": "Capture a scope screenshot artifact for a net.",
                 "extract_signal_features": "Extract basic voltage features from a waveform CSV.",
                 "diagnose_hardware": "Run rule-based diagnosis over current session measurements.",
                 "suggest_next_probe": "Suggest low-risk next measurements.",
@@ -536,7 +600,10 @@ class BenchApp:
             if artifact is None:
                 raise ValueError(f"Unknown artifact resource: {artifact_id}")
             artifact_path = Path(str(artifact.get("uri", "")))
-            if artifact.get("mime_type", "").startswith("text/") and artifact_path.exists():
+            if (
+                artifact.get("mime_type", "").startswith("text/")
+                or artifact.get("mime_type") == "image/svg+xml"
+            ) and artifact_path.exists():
                 return {
                     "ok": True,
                     "mime_type": artifact.get("mime_type", "text/plain"),
