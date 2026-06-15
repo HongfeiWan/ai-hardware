@@ -215,24 +215,48 @@ class BoardContext:
             if name in net_names:
                 raise ValueError(f"Duplicate net name: {name}")
             net_names.add(name)
+        component_names: set[str] = set()
         for component in self.data["components"]:
-            if not component.get("designator") or not component.get("type"):
+            designator = component.get("designator")
+            if not designator or not component.get("type"):
                 raise ValueError("Every component needs designator and type")
+            if designator in component_names:
+                raise ValueError(f"Duplicate component designator: {designator}")
+            component_names.add(designator)
             for pin in component.get("pins", []):
                 if not pin.get("name") or not pin.get("net"):
-                    raise ValueError(f"Component {component.get('designator')} has an incomplete pin")
+                    raise ValueError(f"Component {designator} has an incomplete pin")
                 if pin["net"] not in net_names:
-                    raise ValueError(f"Pin {component.get('designator')}.{pin.get('name')} references unknown net {pin['net']}")
+                    raise ValueError(f"Pin {designator}.{pin.get('name')} references unknown net {pin['net']}")
+        test_point_ids: set[str] = set()
         for point in self.data.get("test_points", []):
-            if not point.get("id") or not point.get("net"):
+            point_id = point.get("id")
+            if not point_id or not point.get("net"):
                 raise ValueError("Every test point needs id and net")
+            if point_id in test_point_ids:
+                raise ValueError(f"Duplicate test point id: {point_id}")
+            test_point_ids.add(point_id)
             if point["net"] not in net_names:
-                raise ValueError(f"Test point {point.get('id')} references unknown net {point['net']}")
+                raise ValueError(f"Test point {point_id} references unknown net {point['net']}")
+        rail_names: set[str] = set()
         for rail in self.data.get("rails", []) or []:
-            if not rail.get("name") or not rail.get("source_net") or not rail.get("output_net"):
+            rail_name = rail.get("name")
+            if not rail_name or not rail.get("source_net") or not rail.get("output_net"):
                 raise ValueError("Every rail needs name, source_net and output_net")
+            if rail_name in rail_names:
+                raise ValueError(f"Duplicate rail name: {rail_name}")
+            rail_names.add(rail_name)
             if rail["output_net"] not in net_names:
-                raise ValueError(f"Rail {rail.get('name')} references unknown output_net {rail['output_net']}")
+                raise ValueError(f"Rail {rail_name} references unknown output_net {rail['output_net']}")
+            for key in ("enable_net", "power_good_net"):
+                if rail.get(key) and rail[key] not in net_names:
+                    raise ValueError(f"Rail {rail_name} references unknown {key} {rail[key]}")
+        for constraint in self.data.get("constraints", []) or []:
+            constraint_type = constraint.get("type")
+            if constraint_type in {"do_not_drive", "manual_confirmation"}:
+                for target in constraint.get("targets", []) or []:
+                    if target not in net_names:
+                        raise ValueError(f"Constraint {constraint.get('id')} references unknown net target {target}")
 
 
 def load_board_context(path: str | Path) -> BoardContext:

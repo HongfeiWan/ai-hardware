@@ -9,7 +9,7 @@ import unittest
 import urllib.request
 
 from ai_hardware_bench.bench import BenchApp
-from ai_hardware_bench.data import load_board_context
+from ai_hardware_bench.data import BoardContext, load_board_context
 from ai_hardware_bench.importers import import_board
 from ai_hardware_bench.mcp_server import StdioJsonRpcServer
 from ai_hardware_bench.model import ModelOutputValidationError
@@ -28,6 +28,31 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertEqual(board.board_id, "usb_power_stage_demo")
         self.assertIn("VOUT_3V3", board.nets)
         self.assertEqual(board.canonical_net("3V3"), "VOUT_3V3")
+
+    def test_board_context_rejects_bad_cross_references(self) -> None:
+        board = load_board_context(BOARD)
+
+        bad_enable = json.loads(json.dumps(board.data))
+        bad_enable["rails"][1]["enable_net"] = "MISSING_ENABLE"
+        with self.assertRaisesRegex(ValueError, "unknown enable_net MISSING_ENABLE"):
+            BoardContext(bad_enable)
+
+        duplicate_test_point = json.loads(json.dumps(board.data))
+        duplicate_test_point["test_points"].append(dict(duplicate_test_point["test_points"][0]))
+        with self.assertRaisesRegex(ValueError, "Duplicate test point id"):
+            BoardContext(duplicate_test_point)
+
+        bad_constraint = json.loads(json.dumps(board.data))
+        bad_constraint["constraints"].append(
+            {
+                "id": "bad_manual_target",
+                "type": "manual_confirmation",
+                "targets": ["MISSING_NET"],
+                "description": "Invalid target should be rejected.",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "unknown net target MISSING_NET"):
+            BoardContext(bad_constraint)
 
     def test_mock_diagnostic_flow_writes_session_and_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
