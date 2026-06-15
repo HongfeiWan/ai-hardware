@@ -92,6 +92,7 @@ sequenceDiagram
 | `measure_dc_voltage` | 用 DMM 测量目标网标直流电压 | 高风险网标需人工确认 |
 | `measure_impedance` | 用 DMM 测量断电状态下目标网标对地阻抗 | 必须断电，高风险网标需人工确认 |
 | `capture_waveform` | 采集某测试点波形 | 通道映射 allowlist |
+| `capture_logic` | 采集数字信号电平序列并保存 CSV artifact | 高风险网标需人工确认 |
 | `capture_scope_screenshot` | 保存示波器屏幕截图 artifact | 高风险网标同样需要确认 |
 | `extract_signal_features` | 从波形提取纹波、频率、占空比等 | 无副作用 |
 | `diagnose_hardware` | 调用模型做结构化诊断 | 输出必须 schema 校验 |
