@@ -8,10 +8,10 @@ from html import escape
 import json
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .bench import BenchApp
-from .data import load_board_context
+from .data import load_board_context, load_document
 from .regression import run_regression_suite
 from .report import generate_session_report
 
@@ -63,6 +63,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/board":
             self._send_json(self._board_payload())
+            return
+        if parsed.path == "/api/replay":
+            query = parse_qs(parsed.query)
+            max_points = int((query.get("max_points") or ["160"])[0])
+            self._send_json(self._replay_payload(max_points=max_points))
             return
         if parsed.path.startswith("/reports/"):
             self._serve_artifact_file(parsed.path.removeprefix("/reports/"))
@@ -130,6 +135,49 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 app.trace_power_path(rail["output_net"])
                 for rail in sorted(board.rails.values(), key=lambda item: (item.get("startup_order", 999), item["name"]))
             ],
+        }
+
+    def _replay_payload(self, max_points: int = 160) -> dict[str, Any]:
+        session_path = self.console_state.artifact_dir / "demo" / "session.json"
+        if not session_path.exists():
+            return {
+                "ok": False,
+                "reason": "No demo session is available yet.",
+                "session_path": str(session_path),
+                "waveforms": [],
+            }
+        session = load_document(session_path)
+        artifacts = session.get("artifacts", []) or []
+        waveforms = []
+        for artifact in artifacts:
+            if not isinstance(artifact, dict) or artifact.get("kind") != "waveform_csv":
+                continue
+            path = _resolve_console_artifact_path(artifact.get("uri"), self.console_state.artifact_dir, session_path.parent)
+            if path is None:
+                waveforms.append({"artifact": artifact, "ok": False, "reason": "Artifact file is missing."})
+                continue
+            try:
+                samples = _read_waveform_csv(path)
+            except Exception as exc:
+                waveforms.append({"artifact": artifact, "ok": False, "reason": str(exc)})
+                continue
+            measurement = _measurement_for_artifact(session, str(artifact.get("id", "")))
+            waveforms.append(
+                {
+                    "ok": True,
+                    "artifact": artifact,
+                    "measurement": measurement,
+                    "sample_count": len(samples),
+                    "samples": _decimate_samples(samples, max_points=max(16, min(max_points, 1000))),
+                }
+            )
+        return {
+            "ok": True,
+            "session_id": session.get("session_id"),
+            "session_path": str(session_path),
+            "measurement_count": len(session.get("measurements", []) or []),
+            "finding_count": len(session.get("findings", []) or []),
+            "waveforms": waveforms,
         }
 
     def _plan_initial_measurements(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -336,6 +384,7 @@ def render_console_html(state: ConsoleState) -> str:
       <button id="refresh">Refresh</button>
       <button id="plan">Plan First Checks</button>
       <button id="run-demo">Run Demo</button>
+      <button id="replay" class="secondary">Replay Waveforms</button>
       <button id="run-regression" class="secondary">Run Regression</button>
     </div>
   </header>
@@ -359,6 +408,10 @@ def render_console_html(state: ConsoleState) -> str:
       <div id="topology" class="table-wrap"></div>
     </section>
     <section>
+      <h2>Waveform Replay</h2>
+      <div id="waveforms" class="grid"></div>
+    </section>
+    <section>
       <h2>Result</h2>
       <div id="links" class="toolbar"></div>
       <pre id="output">Ready.</pre>
@@ -368,6 +421,7 @@ def render_console_html(state: ConsoleState) -> str:
     const statusEl = document.getElementById('status');
     const topologyEl = document.getElementById('topology');
     const planTableEl = document.getElementById('plan-table');
+    const waveformsEl = document.getElementById('waveforms');
     const outputEl = document.getElementById('output');
     const linksEl = document.getElementById('links');
     const symptomEl = document.getElementById('symptom');
@@ -443,6 +497,44 @@ def render_console_html(state: ConsoleState) -> str:
       </table>`;
     }}
 
+    function renderWaveforms(data) {{
+      const waveforms = data.waveforms || [];
+      if (!data.ok || waveforms.length === 0) {{
+        waveformsEl.innerHTML = `<div class="metric"><span>Waveforms</span><strong>${{escapeHtml(data.reason || 'Run Demo first')}}</strong></div>`;
+        return;
+      }}
+      waveformsEl.innerHTML = waveforms.map(item => {{
+        if (!item.ok) {{
+          return `<div class="metric"><span>${{escapeHtml(item.artifact?.id || 'artifact')}}</span><strong>${{escapeHtml(item.reason)}}</strong></div>`;
+        }}
+        const samples = item.samples || [];
+        const values = samples.map(sample => sample.voltage_V);
+        const times = samples.map(sample => sample.t_s);
+        const minV = Math.min(...values);
+        const maxV = Math.max(...values);
+        const minT = Math.min(...times);
+        const maxT = Math.max(...times);
+        const width = 520;
+        const height = 140;
+        const pad = 12;
+        const points = samples.map(sample => {{
+          const x = pad + ((sample.t_s - minT) / Math.max(maxT - minT, 1e-12)) * (width - pad * 2);
+          const y = height - pad - ((sample.voltage_V - minV) / Math.max(maxV - minV, 1e-12)) * (height - pad * 2);
+          return `${{x.toFixed(2)}},${{y.toFixed(2)}}`;
+        }}).join(' ');
+        const measurement = item.measurement || {{}};
+        const features = measurement.features || {{}};
+        return `<div class="metric">
+          <span><code>${{escapeHtml(measurement.target?.net || item.artifact?.id || 'waveform')}}</code></span>
+          <svg viewBox="0 0 ${{width}} ${{height}}" width="100%" height="140" role="img" aria-label="Waveform preview">
+            <rect x="0" y="0" width="${{width}}" height="${{height}}" fill="#fbfcfd" stroke="#d9dfe7"></rect>
+            <polyline fill="none" stroke="#0f766e" stroke-width="2" points="${{points}}"></polyline>
+          </svg>
+          <div class="muted">${{item.sample_count}} samples, vpp=${{escapeHtml(features.v_pp_V ?? '')}} V, avg=${{escapeHtml(features.v_avg_V ?? '')}} V</div>
+        </div>`;
+      }}).join('');
+    }}
+
     async function refresh() {{
       const [statusResponse, boardResponse] = await Promise.all([fetch('/api/status'), fetch('/api/board')]);
       const data = await statusResponse.json();
@@ -481,7 +573,15 @@ def render_console_html(state: ConsoleState) -> str:
       const data = await response.json();
       setLinks(data);
       show(data);
+      await replayWaveforms();
       await refresh();
+    }}
+
+    async function replayWaveforms() {{
+      const response = await fetch('/api/replay?max_points=180');
+      const data = await response.json();
+      renderWaveforms(data);
+      show(data);
     }}
 
     async function runRegression() {{
@@ -495,6 +595,7 @@ def render_console_html(state: ConsoleState) -> str:
     document.getElementById('refresh').addEventListener('click', refresh);
     document.getElementById('plan').addEventListener('click', runPlan);
     document.getElementById('run-demo').addEventListener('click', runDemo);
+    document.getElementById('replay').addEventListener('click', replayWaveforms);
     document.getElementById('run-regression').addEventListener('click', runRegression);
     refresh();
   </script>
@@ -514,3 +615,60 @@ def _compact_last(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         "failed": payload.get("failed"),
         "count": payload.get("count"),
     }
+
+
+def _resolve_console_artifact_path(uri: Any, artifact_dir: Path, session_dir: Path) -> Path | None:
+    if not isinstance(uri, str) or not uri:
+        return None
+    path = Path(uri)
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.extend([session_dir / path, artifact_dir / path])
+    root = artifact_dir.resolve()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if not resolved.exists() or not resolved.is_file():
+            continue
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            if path.is_absolute():
+                continue
+        return resolved
+    return None
+
+
+def _read_waveform_csv(path: Path) -> list[dict[str, float]]:
+    samples: list[dict[str, float]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        header = handle.readline().strip().split(",")
+        if header[:2] != ["t_s", "voltage_V"]:
+            raise ValueError("Unsupported waveform CSV header")
+        for line in handle:
+            if not line.strip():
+                continue
+            t_s, voltage_v = line.strip().split(",", 1)
+            samples.append({"t_s": float(t_s), "voltage_V": float(voltage_v)})
+    return samples
+
+
+def _decimate_samples(samples: list[dict[str, float]], max_points: int) -> list[dict[str, float]]:
+    if len(samples) <= max_points:
+        return samples
+    step = (len(samples) - 1) / max(max_points - 1, 1)
+    result = []
+    used_indexes: set[int] = set()
+    for index in range(max_points):
+        source_index = round(index * step)
+        if source_index in used_indexes:
+            continue
+        used_indexes.add(source_index)
+        result.append(samples[source_index])
+    return result
+
+
+def _measurement_for_artifact(session: dict[str, Any], artifact_id: str) -> dict[str, Any] | None:
+    for measurement in session.get("measurements", []) or []:
+        if artifact_id in (measurement.get("artifact_ids") or []):
+            return measurement
+    return None

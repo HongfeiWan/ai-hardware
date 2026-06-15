@@ -323,6 +323,16 @@ class BenchPrototypeTest(unittest.TestCase):
                     demo = json.loads(response.read().decode("utf-8"))
                 self.assertTrue(demo["ok"])
                 self.assertEqual(demo["report_url"], "/reports/demo/report.html")
+
+                with urllib.request.urlopen(f"{base}/api/replay?max_points=40", timeout=5) as response:
+                    replay = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(replay["ok"])
+                self.assertEqual(replay["session_id"], demo["demo"]["loaded"]["session_id"])
+                self.assertEqual(len(replay["waveforms"]), 1)
+                waveform = replay["waveforms"][0]
+                self.assertTrue(waveform["ok"])
+                self.assertLessEqual(len(waveform["samples"]), 40)
+                self.assertEqual(waveform["measurement"]["target"]["net"], "VOUT_3V3")
             finally:
                 server.shutdown()
                 server.server_close()
