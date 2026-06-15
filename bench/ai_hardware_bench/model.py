@@ -50,6 +50,7 @@ class RuleBasedModelAdapter:
         ripple_rails: list[str] = []
         low_enable_nets: list[str] = []
         low_power_good_nets: list[str] = []
+        shorted_nets: list[str] = []
         current_limited = False
         for measurement in session.data["measurements"]:
             target_net = measurement.get("target", {}).get("net")
@@ -100,7 +101,24 @@ class RuleBasedModelAdapter:
                             evidence.append(
                                 f"{target_net} logic capture remains low with high_fraction={high_fraction}."
                             )
-        if over_voltage_rails:
+            if measurement.get("kind") == "impedance" and target_net in board.nets:
+                resistance = features.get("resistance_ohm")
+                short_to_ground = bool(features.get("short_to_ground", False))
+                if short_to_ground or (isinstance(resistance, (int, float)) and resistance < 10.0):
+                    shorted_nets.append(target_net)
+                    evidence.append(f"{target_net} measures {resistance} ohm to ground with power off.")
+        if shorted_nets:
+            action_net = shorted_nets[0]
+            summary = f"{action_net} appears shorted to ground; do not apply power until the fault is isolated."
+            confidence = 0.84
+            severity = "critical"
+            action = {
+                "type": "stop",
+                "reason": "Power-off impedance indicates a likely rail-to-ground short.",
+                "risk_level": "high",
+                "requires_confirmation": False,
+            }
+        elif over_voltage_rails:
             summary = f"{over_voltage_rails[0]} is above its expected voltage range; stop power before further probing."
             confidence = 0.82
             severity = "critical"
@@ -186,6 +204,7 @@ class RuleBasedModelAdapter:
                 | set(ripple_rails)
                 | set(low_enable_nets)
                 | set(low_power_good_nets)
+                | set(shorted_nets)
                 | {action_net}
             ),
             "related_components": [item["designator"] for item in topology.components_on_net(action_net)],

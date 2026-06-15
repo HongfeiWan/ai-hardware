@@ -82,6 +82,24 @@
         "next_action_net": "PG_3V3",
         "next_action_type": "inspect_component"
       }
+    },
+    {
+      "id": "usb_power_stage_vout_short_to_ground",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail appears shorted to ground before power is applied.",
+      "tool_calls": [
+        {
+          "name": "measure_impedance",
+          "arguments": {
+            "net": "VOUT_3V3"
+          }
+        }
+      ],
+      "expected": {
+        "severity": "critical",
+        "summary_contains": "shorted",
+        "next_action_type": "stop"
+      }
     }
   ]
 }

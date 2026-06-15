@@ -307,6 +307,17 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
             self.assertEqual(result["next_actions"][0]["net"], "PG_3V3")
 
+    def test_rule_model_detects_power_off_short(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="3V3 rail appears shorted to ground")
+            impedance = app.call_tool("measure_impedance", {"net": "VOUT_3V3"})
+            self.assertTrue(impedance["measurement"]["features"]["short_to_ground"])
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "critical")
+            self.assertIn("shorted", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "stop")
+
     def test_json_http_model_output_is_validated_and_saved(self) -> None:
         payload = {
             "finding": {
@@ -396,8 +407,8 @@ class BenchPrototypeTest(unittest.TestCase):
             suite = ROOT / "examples" / "regressions" / "usb_power_stage.json"
             result = run_regression_suite(suite, Path(tmp) / "regression")
             self.assertTrue(result["ok"], result)
-            self.assertEqual(result["count"], 5)
-            self.assertEqual(result["passed"], 5)
+            self.assertEqual(result["count"], 6)
+            self.assertEqual(result["passed"], 6)
 
     def test_html_report_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
