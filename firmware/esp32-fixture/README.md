@@ -100,7 +100,7 @@ From the source project, you can flash a verified bundle without rebuilding:
 
 ```bash
 python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip \
-  --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash
+  --port /dev/tty.usbserial-XXXX --wait-port 60 --identify --erase-flash
 ```
 
 `flash-bundle` requires the current Python environment to provide
@@ -121,13 +121,19 @@ With a board connected, identify the ESP32 and flash chip before writing:
 python3 tools/deploy.py identify --port /dev/tty.usbserial-XXXX --wait-port 60
 ```
 
+You can also include `--identify` in `flash-bundle` so the same command reads
+the MAC and flash ID before erasing or writing flash.
+
 To flash the bundle and then run the MCP smoke test:
 
 ```bash
 python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip \
   --port /dev/tty.usbserial-XXXX --wait-port 60 \
-  --erase-flash --smoke --prompt --wait-ready 30
+  --identify --erase-flash --smoke --prompt --wait-ready 30
 ```
+
+When `flash-bundle --smoke` is used without custom `--host`, `--http-port` or
+`--endpoint` values, the smoke test target is taken from the bundle manifest.
 
 For first bring-up, use `provision` so the same command can build, flash and
 optionally run the non-destructive MCP smoke test:
@@ -246,7 +252,7 @@ For Station mode, configure:
 After flashing, connect your computer to the ESP32 SoftAP and run:
 
 ```bash
-python3 tools/deploy.py smoke --wait-ready 30
+python3 tools/deploy.py smoke --bundle dist/esp32-fixture.zip --wait-ready 30
 ```
 
 The smoke test performs the MCP lifecycle handshake, lists tools, calls
@@ -258,6 +264,9 @@ switch.
 
 `--wait-ready` retries the MCP initialize step while the ESP32 finishes booting
 or while this computer is reconnecting to the fixture SoftAP.
+
+When `--bundle` is provided and `--host`, `--http-port` or `--endpoint` are not
+customized, the smoke test target is taken from the bundle manifest.
 
 After the fixture wiring is confirmed, add `--exercise-net-adc-tool` to also
 call `fixture.read_net_adc_raw`, `fixture.scan_net_adc` and
@@ -276,7 +285,7 @@ To verify runtime net/testpoint mapping, NVS persistence and net-based MUX
 selection, run:
 
 ```bash
-python3 tools/deploy.py smoke --wait-ready 30 --exercise-runtime-net
+python3 tools/deploy.py smoke --bundle dist/esp32-fixture.zip --wait-ready 30 --exercise-runtime-net
 ```
 
 This writes a temporary `__SMOKE_RUNTIME_NET__` mapping, confirms it appears in

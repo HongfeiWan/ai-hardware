@@ -529,8 +529,12 @@ def identify_command() -> str:
 def flash_bundle_command(bundle_ref: str = "<bundle-dir-or-zip>") -> str:
     return (
         "python3 tools/deploy.py flash-bundle "
-        f"--bundle {bundle_ref} --port /dev/cu.usbserial-XXXX --wait-port 60 --erase-flash"
+        f"--bundle {bundle_ref} --port /dev/cu.usbserial-XXXX --wait-port 60 --identify --erase-flash"
     )
+
+
+def smoke_command(bundle_ref: str = "dist/esp32-fixture.zip") -> str:
+    return f"python3 tools/deploy.py smoke --bundle {bundle_ref} --wait-ready 30"
 
 
 def mcp_connection_details(mcp: dict) -> dict[str, object]:
@@ -540,6 +544,9 @@ def mcp_connection_details(mcp: dict) -> dict[str, object]:
     softap_prefix = str(mcp.get("default_softap_prefix") or "ai-hardware-fixture")
     softap_password = str(mcp.get("default_softap_password") or "")
     return {
+        "host": host,
+        "port": port,
+        "endpoint": endpoint,
         "softap_ssid": f"{softap_prefix}-XXXX",
         "softap_password": softap_password or "<open>",
         "endpoint_url": f"http://{host}:{port}/{endpoint}",
@@ -553,6 +560,18 @@ def print_mcp_connection(summary: dict[str, object]) -> None:
     print(f"SoftAP SSID: {details.get('softap_ssid')}")
     print(f"SoftAP password: {details.get('softap_password')}")
     print(f"MCP endpoint: {details.get('endpoint_url')}")
+
+
+def apply_mcp_connection_defaults(args: argparse.Namespace, summary: dict[str, object]) -> None:
+    details = summary.get("mcp_connection")
+    if not isinstance(details, dict):
+        return
+    if args.host == DEFAULT_MCP_HOST:
+        args.host = str(details.get("host") or args.host)
+    if args.http_port == DEFAULT_MCP_PORT:
+        args.http_port = parse_int(details.get("port", args.http_port))
+    if args.endpoint == DEFAULT_MCP_ENDPOINT:
+        args.endpoint = str(details.get("endpoint") or args.endpoint)
 
 
 def prefer_callout_ports(ports: set[str]) -> list[str]:
@@ -634,6 +653,12 @@ def flash_monitor(args: argparse.Namespace) -> None:
 
 
 def smoke(args: argparse.Namespace) -> None:
+    if getattr(args, "bundle", None):
+        with open_bundle_source(args.bundle) as bundle_dir:
+            summary = validate_bundle_dir(bundle_dir)
+        apply_mcp_connection_defaults(args, summary)
+        print_mcp_connection(summary)
+        print(f"Smoke target: {endpoint_url(args)}")
     run_smoke_test(args)
 
 
@@ -779,12 +804,16 @@ def run_esptool(port: str, baud: int, esptool_args: list[str], cwd: Path) -> Non
     subprocess.run(command, cwd=cwd, check=True)
 
 
+def identify_esp32(port: str, baud: int) -> None:
+    print(f"Identifying ESP32 on {port}...")
+    run_esptool(port, baud, ["read_mac"], PROJECT_DIR)
+    run_esptool(port, baud, ["flash_id"], PROJECT_DIR)
+
+
 def identify(args: argparse.Namespace) -> None:
     ensure_esptool_available()
     port = resolve_port(args.port, args.wait_port)
-    print(f"Identifying ESP32 on {port}...")
-    run_esptool(port, args.baud, ["read_mac"], PROJECT_DIR)
-    run_esptool(port, args.baud, ["flash_id"], PROJECT_DIR)
+    identify_esp32(port, args.baud)
 
 
 def flash_bundle(args: argparse.Namespace) -> None:
@@ -793,18 +822,22 @@ def flash_bundle(args: argparse.Namespace) -> None:
         summary = validate_bundle_dir(bundle_dir)
         ensure_esptool_available()
         port = resolve_port(args.port, args.wait_port)
+        if args.identify:
+            identify_esp32(port, args.baud)
         if args.erase_flash:
             run_esptool(port, args.baud, ["erase_flash"], bundle_dir)
         run_esptool(port, args.baud, ["write_flash", "@flash_args"], bundle_dir)
 
     print(f"Flashed verified bundle from {source}.")
     print(f"App: {summary['app_path']} ({summary['app_size']} bytes at {summary['app_offset']})")
-    print(f"MCP endpoint: http://{args.host}:{args.http_port}/{args.endpoint}")
+    print_mcp_connection(summary)
 
     if not args.smoke:
-        print("Run `python3 tools/deploy.py smoke --wait-ready 30` after connecting to the fixture network.")
+        print("Run `python3 tools/deploy.py smoke --bundle dist/esp32-fixture.zip --wait-ready 30` after connecting to the fixture network.")
         return
 
+    apply_mcp_connection_defaults(args, summary)
+    print(f"Smoke target: {endpoint_url(args)}")
     if args.prompt and sys.stdin.isatty():
         input("Connect this computer to the ESP32 fixture Wi-Fi, then press Enter to run the smoke test...")
     elif args.post_flash_delay > 0:
@@ -941,6 +974,7 @@ def validate_bundle_dir(bundle_dir: Path) -> dict[str, object]:
         "preflight_command.txt",
         "identify_command.txt",
         "flash_bundle_command.txt",
+        "smoke_command.txt",
         "README.md",
     }
     missing_auxiliary = sorted(required_auxiliary - auxiliary_paths)
@@ -962,6 +996,9 @@ def validate_bundle_dir(bundle_dir: Path) -> dict[str, object]:
     flash_bundle_command_text = (bundle_dir / "flash_bundle_command.txt").read_text(encoding="utf-8").strip()
     if flash_bundle_command_text != manifest.get("flash_bundle_command"):
         raise RuntimeError("flash_bundle_command.txt does not match manifest flash_bundle_command")
+    smoke_command_text = (bundle_dir / "smoke_command.txt").read_text(encoding="utf-8").strip()
+    if smoke_command_text != manifest.get("smoke_command"):
+        raise RuntimeError("smoke_command.txt does not match manifest smoke_command")
     bundle_readme = (bundle_dir / "README.md").read_text(encoding="utf-8", errors="ignore")
     for expected_text in (
         flash_command_text,
@@ -971,7 +1008,7 @@ def validate_bundle_dir(bundle_dir: Path) -> dict[str, object]:
         identify_command_text,
         "python3 tools/deploy.py verify-bundle --bundle dist/esp32-fixture.zip",
         flash_bundle_command_text,
-        "python3 tools/deploy.py smoke --wait-ready 30",
+        smoke_command_text,
     ):
         if expected_text not in bundle_readme:
             raise RuntimeError(f"Bundle README.md is missing expected text: {expected_text}")
@@ -1086,6 +1123,7 @@ def bundle(args: argparse.Namespace) -> None:
         "preflight_command": preflight_command(),
         "identify_command": identify_command(),
         "flash_bundle_command": flash_bundle_command(),
+        "smoke_command": smoke_command(),
         "flash_settings": flasher_args.get("flash_settings", {}),
         "files": bundled_files,
         "sdkconfig": sdkconfig,
@@ -1104,6 +1142,7 @@ def bundle(args: argparse.Namespace) -> None:
     (output_dir / "preflight_command.txt").write_text(preflight_command() + "\n", encoding="utf-8")
     (output_dir / "identify_command.txt").write_text(identify_command() + "\n", encoding="utf-8")
     (output_dir / "flash_bundle_command.txt").write_text(flash_bundle_command() + "\n", encoding="utf-8")
+    (output_dir / "smoke_command.txt").write_text(smoke_command() + "\n", encoding="utf-8")
     (output_dir / "README.md").write_text(
         "\n".join(
             [
@@ -1159,7 +1198,7 @@ def bundle(args: argparse.Namespace) -> None:
                 "After flashing, connect to the fixture network and run the MCP smoke test from the source project:",
                 "",
                 "```bash",
-                "python3 tools/deploy.py smoke --wait-ready 30",
+                smoke_command(),
                 "```",
                 "",
                 "See `manifest.json` for image hashes, offsets and key firmware configuration.",
@@ -1178,6 +1217,7 @@ def bundle(args: argparse.Namespace) -> None:
             "preflight_command.txt",
             "identify_command.txt",
             "flash_bundle_command.txt",
+            "smoke_command.txt",
             "README.md",
         )
     ]
@@ -1331,7 +1371,7 @@ def preflight(args: argparse.Namespace) -> None:
             "  "
             f"{sys.executable} {relative_or_absolute(Path(__file__))} flash-bundle "
             f"--bundle {bundle_arg} --port {port_for_next_step} --wait-port 60 "
-            "--erase-flash --smoke --prompt --wait-ready 30 --exercise-runtime-net"
+            "--identify --erase-flash --smoke --prompt --wait-ready 30 --exercise-runtime-net"
         )
     else:
         print("Next: connect an ESP32 serial port, then rerun preflight with --require-port or run flash-bundle.")
@@ -1466,6 +1506,11 @@ def main() -> int:
 
     smoke_parser = subparsers.add_parser("smoke", help="Run non-destructive MCP smoke test")
     add_smoke_args(smoke_parser)
+    smoke_parser.add_argument(
+        "--bundle",
+        type=Path,
+        help="Bundle directory or .zip archive whose manifest supplies the default MCP target",
+    )
     smoke_parser.set_defaults(func=smoke)
 
     load_map_parser = subparsers.add_parser("load-net-map", help="Load runtime net/testpoint mappings into the fixture")
@@ -1560,6 +1605,7 @@ def main() -> int:
         default=DEFAULT_BUNDLE_DIR,
         help=f"Bundle directory or .zip archive to flash, default {DEFAULT_BUNDLE_DIR}",
     )
+    flash_bundle_parser.add_argument("--identify", action="store_true", help="Read ESP32 MAC and flash ID before flashing")
     flash_bundle_parser.add_argument("--erase-flash", action="store_true", help="Erase the whole chip before flashing")
     flash_bundle_parser.add_argument("--smoke", action="store_true", help="Run smoke test after flashing")
     flash_bundle_parser.add_argument("--prompt", action="store_true", help="Prompt before smoke test so you can join SoftAP")

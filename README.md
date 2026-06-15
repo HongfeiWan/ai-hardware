@@ -92,23 +92,25 @@ python3 tools/deploy.py verify-bundle
 python3 tools/deploy.py verify-bundle --bundle dist/esp32-fixture.zip
 python3 tools/deploy.py preflight --bundle dist/esp32-fixture.zip
 python3 tools/deploy.py provision --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash --smoke --prompt --wait-ready 30
-python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip --port /dev/tty.usbserial-XXXX --wait-port 60 --erase-flash --smoke --prompt --wait-ready 30
+python3 tools/deploy.py flash-bundle --bundle dist/esp32-fixture.zip --port /dev/tty.usbserial-XXXX --wait-port 60 --identify --erase-flash --smoke --prompt --wait-ready 30
 ```
 
 固件使用 4MB ESP32 分区表，factory app 分区为 3MB；构建已用 ESP-IDF v5.4.4 在 ESP32 target 上验证通过，当前 app 约 `0xe9890` 字节，app 分区剩余约 70%。`bundle` 会生成包含 bootloader、partition table、app、`flash_args`、`manifest.json`、命令文件和 SHA-256 的烧录包；`verify-bundle` 会交叉检查 manifest、哈希、flash args、命令文件、README 和 app 分区尺寸。烧录后连接默认 SoftAP，再运行：
 
 如果只想烧录已经生成并校验过的固件包，不重新 build，可以使用 `flash-bundle`。它支持 `dist/esp32-fixture` 目录和 `dist/esp32-fixture.zip`，会先校验包内容，再按 bundle 里的 `flash_args` 通过 esptool 写入 ESP32。
 烧录前需要当前 Python 环境能运行 `python -m esptool`；source ESP-IDF 的 `export.sh` 会提供这个环境，`doctor` 会显示当前 shell 是否可用。
+加 `--identify` 时，脚本会在擦写前读取 ESP32 MAC 和 flash ID，确认串口上的芯片可通信。
+`flash-bundle --smoke` 未显式传入 host/port/endpoint 时，会使用 bundle manifest 里的 MCP 连接信息。
 `preflight` 会把 ESP-IDF、esptool、构建产物、bundle/zip 校验和串口状态集中输出；默认适合烧录现成 zip 的测试站，加 `--require-port`、`--require-idf` 或 `--require-build` 可以把对应项当作失败处理。
 
 ```bash
-python3 tools/deploy.py smoke --wait-ready 30
+python3 tools/deploy.py smoke --bundle dist/esp32-fixture.zip --wait-ready 30
 ```
 
 要验证“按当前待测板网标动态映射到 MUX channel”的链路，可在确认夹具空载或接线安全后运行：
 
 ```bash
-python3 tools/deploy.py smoke --wait-ready 30 --exercise-runtime-net
+python3 tools/deploy.py smoke --bundle dist/esp32-fixture.zip --wait-ready 30 --exercise-runtime-net
 ```
 
 Python 测试站也可以直接下发当前 DUT 的 runtime 网标映射：
