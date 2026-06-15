@@ -391,6 +391,29 @@ class BenchApp:
         session = self.require_session()
         if uri == f"session://measurements/{session.session_id}":
             return {"ok": True, "content": session.data}
+        artifact_prefix = f"session://artifacts/{session.session_id}/"
+        if uri.startswith(artifact_prefix):
+            artifact_id = uri.removeprefix(artifact_prefix)
+            artifact = next((item for item in session.data["artifacts"] if item.get("id") == artifact_id), None)
+            if artifact is None:
+                raise ValueError(f"Unknown artifact resource: {artifact_id}")
+            artifact_path = Path(str(artifact.get("uri", "")))
+            if artifact.get("mime_type", "").startswith("text/") and artifact_path.exists():
+                return {
+                    "ok": True,
+                    "mime_type": artifact.get("mime_type", "text/plain"),
+                    "text": artifact_path.read_text(encoding="utf-8"),
+                    "metadata": artifact,
+                }
+            return {
+                "ok": True,
+                "mime_type": "application/json",
+                "content": {
+                    "artifact": artifact,
+                    "available_as_text": False,
+                    "reason": "Only text artifacts are returned inline by the bench MCP prototype.",
+                },
+            }
         raise ValueError(f"Unknown resource URI: {uri}")
 
     def save_session(self, path: str | Path) -> dict[str, Any]:

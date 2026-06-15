@@ -95,6 +95,32 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertIn("USB Power Stage Demo", message)
         self.assertIn("Relevant measurements", message)
 
+    def test_mcp_resources_include_nets_and_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.demo(BOARD, "3V3 rail does not stay up after USB input is applied.")
+            server = StdioJsonRpcServer(app)
+            listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}})
+            self.assertIsNotNone(listed)
+            uris = {item["uri"] for item in listed["result"]["resources"]}
+            self.assertIn("board://net/usb_power_stage_demo/VOUT_3V3", uris)
+            artifact_id = app.session.data["artifacts"][0]["id"]
+            artifact_uri = f"session://artifacts/{app.session.session_id}/{artifact_id}"
+            self.assertIn(artifact_uri, uris)
+
+            read_artifact = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "resources/read",
+                    "params": {"uri": artifact_uri},
+                }
+            )
+            self.assertIsNotNone(read_artifact)
+            content = read_artifact["result"]["contents"][0]
+            self.assertEqual(content["mimeType"], "text/csv")
+            self.assertIn("t_s,voltage_V", content["text"])
+
     def test_instrument_status_defaults_to_mock(self) -> None:
         app = BenchApp()
         status = app.instrument_status()

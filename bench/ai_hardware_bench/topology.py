@@ -56,6 +56,86 @@ class Topology:
             "neighbor_nets": neighbor_nets,
         }
 
+    def find_test_points(
+        self,
+        net: str | None = None,
+        measurement: str | None = None,
+        risk_level: str | None = None,
+    ) -> list[dict[str, Any]]:
+        net_name = self.board.canonical_net(net) if net else None
+        points: list[dict[str, Any]] = []
+        for point in self.board.test_points.values():
+            if net_name and point.get("net") != net_name:
+                continue
+            if risk_level and point.get("risk_level") != risk_level:
+                continue
+            allowed = point.get("allowed_measurements") or []
+            if measurement and allowed and measurement not in allowed:
+                continue
+            points.append(point)
+        return sorted(points, key=lambda item: item["id"])
+
+    def trace_power_path(self, net: str) -> dict[str, Any]:
+        target = self.board.canonical_net(net)
+        paths = []
+        for rail in self.board.rails.values():
+            if rail.get("output_net") == target:
+                path = [rail]
+                source = rail.get("source_net")
+                visited = {rail["name"]}
+                while source in self.board.nets:
+                    upstream = next(
+                        (
+                            candidate
+                            for candidate in self.board.rails.values()
+                            if candidate.get("output_net") == source and candidate["name"] not in visited
+                        ),
+                        None,
+                    )
+                    if upstream is None:
+                        break
+                    path.append(upstream)
+                    visited.add(upstream["name"])
+                    source = upstream.get("source_net")
+                paths.append(list(reversed(path)))
+        return {
+            "net": target,
+            "paths": [
+                {
+                    "rails": path,
+                    "source_net": path[0].get("source_net") if path else None,
+                    "output_net": path[-1].get("output_net") if path else target,
+                }
+                for path in paths
+            ],
+        }
+
+    def list_downstream_loads(self, rail: str | None = None, net: str | None = None, depth: int = 2) -> dict[str, Any]:
+        if rail:
+            if rail not in self.board.rails:
+                raise ValueError(f"Unknown rail: {rail}")
+            start = self.board.rails[rail]["output_net"]
+        elif net:
+            start = self.board.canonical_net(net)
+        else:
+            raise ValueError("Provide rail or net")
+        max_depth = max(0, min(depth, 4))
+        distances = self._net_distances(start, max_depth)
+        loads = []
+        for candidate_net, distance in sorted(distances.items(), key=lambda item: (item[1], item[0])):
+            for component in self.components_on_net(candidate_net):
+                component_type = component.get("type", "")
+                if component_type in {"capacitor", "inductor"}:
+                    continue
+                loads.append(
+                    {
+                        "net": candidate_net,
+                        "distance": distance,
+                        "component": component,
+                    }
+                )
+        return {"net": start, "depth": max_depth, "loads": loads, "count": len(loads)}
+
     def components_on_net(self, net: str) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for component in self.board.components.values():
@@ -103,4 +183,3 @@ class Topology:
                 elif rail.get("output_net") == net and rail.get(key) in self.board.nets:
                     neighbors.add(rail[key])
         return neighbors
-

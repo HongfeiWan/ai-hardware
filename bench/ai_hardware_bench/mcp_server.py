@@ -77,6 +77,14 @@ class StdioJsonRpcServer:
                         },
                     ]
                 )
+                for net_name in sorted(board.nets):
+                    resources.append(
+                        {
+                            "uri": f"board://net/{board.board_id}/{net_name}",
+                            "name": f"Net {net_name}",
+                            "mimeType": "application/json",
+                        }
+                    )
             if session:
                 resources.append(
                     {
@@ -85,16 +93,32 @@ class StdioJsonRpcServer:
                         "mimeType": "application/json",
                     }
                 )
+                for artifact in session.data.get("artifacts", []):
+                    artifact_id = artifact.get("id")
+                    if artifact_id:
+                        resources.append(
+                            {
+                                "uri": f"session://artifacts/{session.session_id}/{artifact_id}",
+                                "name": f"Artifact {artifact_id}",
+                                "mimeType": artifact.get("mime_type", "application/json"),
+                            }
+                        )
             return {"resources": resources}
         if method == "resources/read":
             uri = params.get("uri")
             payload = self.app.read_resource(uri)
+            if "text" in payload:
+                text = payload["text"]
+                mime_type = payload.get("mime_type", "text/plain")
+            else:
+                text = json.dumps(payload["content"] if "content" in payload else payload, ensure_ascii=False, indent=2)
+                mime_type = payload.get("mime_type", "application/json")
             return {
                 "contents": [
                     {
                         "uri": uri,
-                        "mimeType": "application/json",
-                        "text": json.dumps(payload["content"] if "content" in payload else payload, ensure_ascii=False, indent=2),
+                        "mimeType": mime_type,
+                        "text": text,
                     }
                 ]
             }
