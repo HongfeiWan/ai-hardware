@@ -291,6 +291,28 @@ class BenchPrototypeTest(unittest.TestCase):
                 self.assertTrue(status["ok"])
                 self.assertEqual(status["board"]["id"], "usb_power_stage_demo")
 
+                with urllib.request.urlopen(f"{base}/api/board", timeout=5) as response:
+                    board = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(board["ok"])
+                self.assertIn("power_paths", board)
+                self.assertEqual(board["nets"][0]["name"], "EN_3V3")
+
+                plan_request = urllib.request.Request(
+                    f"{base}/api/plan",
+                    data=json.dumps({"max_actions": 5, "risk_ceiling": "medium"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(plan_request, timeout=5) as response:
+                    plan = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(plan["ok"])
+                self.assertGreaterEqual(plan["count"], 4)
+                self.assertNotIn("SW_NODE", {action.get("net") for action in plan["next_actions"]})
+
+                with urllib.request.urlopen(f"{base}/api/status", timeout=5) as response:
+                    status_after_plan = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(status_after_plan["last_plan"]["count"], plan["count"])
+
                 request = urllib.request.Request(
                     f"{base}/api/demo",
                     data=json.dumps({"symptom": "3V3 rail does not stay up"}).encode("utf-8"),

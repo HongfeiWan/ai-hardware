@@ -196,7 +196,7 @@ python3 tools/bench.py validate-session artifacts/mock-bench/session.json
 
 可回归诊断任务集放在 [examples/regressions](examples/regressions)。`run-regression --suite` 会逐个运行任务、保存 session/artifact/audit，并检查预期 severity、summary 片段和下一步测量网标。`report` 会把 session 和 audit 汇总成一个静态 HTML 报告，便于回看诊断证据、测量特征、artifact 引用、波形 CSV 预览和工具调用记录。
 
-`console` 会启动一个仅绑定本机的轻量 Web 控制台，默认地址是 `http://127.0.0.1:8766`。控制台可以查看当前板卡摘要、仪器/model 状态，运行 mock demo 或 regression，并打开生成的 HTML 报告。它只依赖 Python 标准库，适合先作为 notebook/Web 控制台之前的本地工程台面。
+`console` 会启动一个仅绑定本机的轻量 Web 控制台，默认地址是 `http://127.0.0.1:8766`。控制台可以查看当前板卡摘要、仪器/model 状态、net/test point 拓扑表，生成首轮低风险测量计划，运行 mock demo 或 regression，并打开生成的 HTML 报告。它只依赖 Python 标准库，适合先作为 notebook/Web 控制台之前的本地工程台面。
 
 `check` 是无硬件质量门槛，会依次执行板卡校验、Python 编译、单元测试、回归 suite、HTML 报告生成，并在存在 ESP32 bundle 时验证 `firmware/esp32-fixture/dist/esp32-fixture.zip`。在没有 ESP32 bundle 的环境里可加 `--skip-esp32-bundle`。
 
