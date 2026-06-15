@@ -205,7 +205,12 @@ class MockScope:
             elif "ripple" in symptom_l:
                 voltage = nominal + nominal * 0.06 * sin(2 * pi * 12 * phase)
             elif net.upper().endswith("SW_NODE"):
-                voltage = nominal * (1.0 if sin(2 * pi * 24 * phase) > 0 else 0.0)
+                if any(token in symptom_l for token in ("not switching", "stuck low", "no switching", "no pulses")):
+                    voltage = 0.02 * nominal * sin(2 * pi * 3 * phase)
+                elif any(token in symptom_l for token in ("stuck high", "always high")):
+                    voltage = nominal
+                else:
+                    voltage = nominal * (1.0 if sin(2 * pi * 24 * phase) > 0 else 0.0)
             else:
                 voltage = nominal + nominal * 0.004 * sin(2 * pi * 5 * phase)
             samples.append((t_s, round(voltage, 6)))

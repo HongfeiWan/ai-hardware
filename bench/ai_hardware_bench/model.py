@@ -51,6 +51,7 @@ class RuleBasedModelAdapter:
         low_enable_nets: list[str] = []
         low_power_good_nets: list[str] = []
         shorted_nets: list[str] = []
+        inactive_switch_nodes: list[str] = []
         current_limited = False
         for measurement in session.data["measurements"]:
             target_net = measurement.get("target", {}).get("net")
@@ -61,11 +62,17 @@ class RuleBasedModelAdapter:
                 current_limited = True
                 evidence.append("Input rail reached the configured current limit.")
             if measurement.get("kind") == "waveform" and target_net in board.nets:
+                net_info = board.nets[target_net]
                 expected = board.nets[target_net].get("expected_voltage")
+                v_max = features.get("v_max_V")
+                v_pp = features.get("v_pp_V")
+                if _is_switching_node(net_info) and _waveform_inactive(v_max, v_pp):
+                    inactive_switch_nodes.append(target_net)
+                    evidence.append(
+                        f"{target_net} switching waveform is inactive with v_pp={v_pp} V and v_max={v_max} V."
+                    )
                 if expected:
                     nominal = (float(expected["min"]) + float(expected["max"])) / 2.0
-                    v_max = features.get("v_max_V")
-                    v_pp = features.get("v_pp_V")
                     if v_max is not None and v_max < expected["min"]:
                         low_voltage_rails.append(target_net)
                         evidence.append(
@@ -117,6 +124,20 @@ class RuleBasedModelAdapter:
                 "reason": "Power-off impedance indicates a likely rail-to-ground short.",
                 "risk_level": "high",
                 "requires_confirmation": False,
+            }
+        elif inactive_switch_nodes:
+            action_net = inactive_switch_nodes[0]
+            summary = f"{action_net} is not switching; inspect the buck controller, enable path and input conditions."
+            confidence = 0.68
+            severity = "fault"
+            component = _first_component_on_net(board, action_net)
+            action = {
+                "type": "inspect_component",
+                "net": action_net,
+                "component": component.get("designator") if component else None,
+                "reason": "Switching node waveform lacks expected pulses; inspect the converter control and bootstrap path.",
+                "risk_level": board.nets[action_net].get("risk_level", "low"),
+                "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
             }
         elif over_voltage_rails:
             summary = f"{over_voltage_rails[0]} is above its expected voltage range; stop power before further probing."
@@ -205,6 +226,7 @@ class RuleBasedModelAdapter:
                 | set(low_enable_nets)
                 | set(low_power_good_nets)
                 | set(shorted_nets)
+                | set(inactive_switch_nodes)
                 | {action_net}
             ),
             "related_components": [item["designator"] for item in topology.components_on_net(action_net)],
@@ -382,6 +404,20 @@ def _first_component_on_net(board: BoardContext, net: str) -> dict[str, Any] | N
             if pin.get("net") == net:
                 return component
     return None
+
+
+def _is_switching_node(net_info: dict[str, Any]) -> bool:
+    name = str(net_info.get("name", "")).upper()
+    notes = str(net_info.get("notes", "")).lower()
+    return bool(net_info.get("expected_frequency")) or "SW" in name or "switching" in notes
+
+
+def _waveform_inactive(v_max: Any, v_pp: Any) -> bool:
+    if not isinstance(v_pp, (int, float)):
+        return False
+    if v_pp > 0.2:
+        return False
+    return not isinstance(v_max, (int, float)) or v_max < 0.5
 
 
 def _measure_waveform_action(board: BoardContext, net: str) -> dict[str, Any]:

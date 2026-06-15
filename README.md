@@ -216,7 +216,7 @@ python3 tools/bench.py call-tool read_audit_log --board examples/boards/usb_powe
 python3 tools/bench.py validate-session artifacts/mock-bench/session.json
 ```
 
-可回归诊断任务集放在 [examples/regressions](examples/regressions)。`run-regression --suite` 会逐个运行任务、保存 session/artifact/audit，并检查预期 severity、summary 片段、下一步测量网标或动作类型；任务也可以用 `tool_calls` 声明诊断前要执行的测量序列。当前 USB 电源链路样板覆盖 3V3 输出塌陷、输出纹波过大、输出过压停机、enable 未拉高、power-good 未释放和电源轨对地短路。`report` 会把 session 和 audit 汇总成一个静态 HTML 报告，便于回看诊断证据、测量特征、artifact 引用、波形/逻辑 CSV 预览和工具调用记录。
+可回归诊断任务集放在 [examples/regressions](examples/regressions)。`run-regression --suite` 会逐个运行任务、保存 session/artifact/audit，并检查预期 severity、summary 片段、下一步测量网标或动作类型；任务也可以用 `tool_calls` 声明诊断前要执行的测量序列。当前 USB 电源链路样板覆盖 3V3 输出塌陷、输出纹波过大、输出过压停机、enable 未拉高、power-good 未释放、电源轨对地短路和 Buck 开关节点不切换。`report` 会把 session 和 audit 汇总成一个静态 HTML 报告，便于回看诊断证据、测量特征、artifact 引用、波形/逻辑 CSV 预览和工具调用记录。
 
 `console` 会启动一个仅绑定本机的轻量 Web 控制台，默认地址是 `http://127.0.0.1:8766`。控制台可以导入 CSV/KiCad XML 板卡上下文、查看当前板卡摘要、仪器/model 状态、net/test point 拓扑表，生成首轮低风险测量计划，运行 mock demo 或 regression，回放最近 demo 的波形 CSV artifact，并打开生成的 HTML 报告。它只依赖 Python 标准库，适合先作为 notebook/Web 控制台之前的本地工程台面。
 

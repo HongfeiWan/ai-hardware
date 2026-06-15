@@ -318,6 +318,19 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertIn("shorted", result["finding"]["summary"])
             self.assertEqual(result["next_actions"][0]["type"], "stop")
 
+    def test_rule_model_detects_inactive_switch_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="SW_NODE not switching with no pulses")
+            waveform = app.call_tool("capture_waveform", {"net": "SW_NODE", "confirm": True, "sample_count": 64})
+            self.assertLess(waveform["measurement"]["features"]["v_pp_V"], 0.2)
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "fault")
+            self.assertIn("SW_NODE", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
+            self.assertEqual(result["next_actions"][0]["net"], "SW_NODE")
+            self.assertTrue(result["next_actions"][0]["requires_confirmation"])
+
     def test_json_http_model_output_is_validated_and_saved(self) -> None:
         payload = {
             "finding": {
@@ -407,8 +420,8 @@ class BenchPrototypeTest(unittest.TestCase):
             suite = ROOT / "examples" / "regressions" / "usb_power_stage.json"
             result = run_regression_suite(suite, Path(tmp) / "regression")
             self.assertTrue(result["ok"], result)
-            self.assertEqual(result["count"], 6)
-            self.assertEqual(result["passed"], 6)
+            self.assertEqual(result["count"], 7)
+            self.assertEqual(result["passed"], 7)
 
     def test_html_report_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

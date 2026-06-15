@@ -100,6 +100,33 @@
         "summary_contains": "shorted",
         "next_action_type": "stop"
       }
+    },
+    {
+      "id": "usb_power_stage_switch_node_inactive",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail is low and SW_NODE not switching with no pulses.",
+      "tool_calls": [
+        {
+          "name": "measure_dc_voltage",
+          "arguments": {
+            "net": "EN_3V3"
+          }
+        },
+        {
+          "name": "capture_waveform",
+          "arguments": {
+            "net": "SW_NODE",
+            "sample_count": 64,
+            "confirm": true
+          }
+        }
+      ],
+      "expected": {
+        "severity": "fault",
+        "summary_contains": "SW_NODE",
+        "next_action_net": "SW_NODE",
+        "next_action_type": "inspect_component"
+      }
     }
   ]
 }
