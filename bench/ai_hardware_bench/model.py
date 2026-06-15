@@ -46,6 +46,8 @@ class RuleBasedModelAdapter:
         evidence: list[str] = []
         related_nets: set[str] = set()
         low_voltage_rails: list[str] = []
+        over_voltage_rails: list[str] = []
+        ripple_rails: list[str] = []
         current_limited = False
         for measurement in session.data["measurements"]:
             target_net = measurement.get("target", {}).get("net")
@@ -57,35 +59,61 @@ class RuleBasedModelAdapter:
                 evidence.append("Input rail reached the configured current limit.")
             if measurement.get("kind") == "waveform" and target_net in board.nets:
                 expected = board.nets[target_net].get("expected_voltage")
-                if expected and features.get("v_max_V") is not None and features["v_max_V"] < expected["min"]:
-                    low_voltage_rails.append(target_net)
-                    evidence.append(
-                        f"{target_net} waveform peaks at {features['v_max_V']} V, below expected {expected['min']} V."
-                    )
-        if low_voltage_rails and current_limited:
+                if expected:
+                    nominal = (float(expected["min"]) + float(expected["max"])) / 2.0
+                    v_max = features.get("v_max_V")
+                    v_pp = features.get("v_pp_V")
+                    if v_max is not None and v_max < expected["min"]:
+                        low_voltage_rails.append(target_net)
+                        evidence.append(
+                            f"{target_net} waveform peaks at {v_max} V, below expected {expected['min']} V."
+                        )
+                    if v_max is not None and v_max > float(expected["max"]) * 1.05:
+                        over_voltage_rails.append(target_net)
+                        evidence.append(
+                            f"{target_net} waveform reaches {v_max} V, above expected {expected['max']} V."
+                        )
+                    if v_pp is not None and v_pp > max(0.15, nominal * 0.08):
+                        ripple_rails.append(target_net)
+                        evidence.append(
+                            f"{target_net} ripple is {v_pp} Vpp, above the rule-of-thumb limit."
+                        )
+        if over_voltage_rails:
+            summary = f"{over_voltage_rails[0]} is above its expected voltage range; stop power before further probing."
+            confidence = 0.82
+            severity = "critical"
+            action = {
+                "type": "stop",
+                "reason": "Measured rail voltage exceeds the configured safe range.",
+                "risk_level": "high",
+                "requires_confirmation": False,
+            }
+            action_net = over_voltage_rails[0]
+        elif low_voltage_rails and current_limited:
             summary = f"{low_voltage_rails[0]} likely collapses because the upstream rail is current-limited."
             confidence = 0.72
             severity = "fault"
+            action_net = "SW_NODE" if "SW_NODE" in board.nets else low_voltage_rails[0]
+            action = _measure_waveform_action(board, action_net)
         elif low_voltage_rails:
             summary = f"{low_voltage_rails[0]} is below its expected voltage range."
             confidence = 0.58
             severity = "warning"
+            action_net = "SW_NODE" if "SW_NODE" in board.nets else low_voltage_rails[0]
+            action = _measure_waveform_action(board, action_net)
+        elif ripple_rails:
+            summary = f"{ripple_rails[0]} shows excessive ripple for its expected voltage range."
+            confidence = 0.62
+            severity = "warning"
+            action_net = "SW_NODE" if "SW_NODE" in board.nets else ripple_rails[0]
+            action = _measure_waveform_action(board, action_net)
         else:
             summary = "No hard fault was identified from the available measurements."
             confidence = 0.35
             severity = "info"
             evidence.append("Available measurements remain within broad limits.")
-        action_net = "SW_NODE" if "SW_NODE" in board.nets and low_voltage_rails else next(iter(board.nets))
-        point = _first_point_for(board, action_net, "waveform")
-        action = {
-            "type": "measure_net",
-            "net": action_net,
-            "test_point": point.get("id") if point else None,
-            "instrument_kind": "oscilloscope",
-            "reason": "Check converter switching behavior before changing power conditions.",
-            "risk_level": board.nets[action_net].get("risk_level", "low"),
-            "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
-        }
+            action_net = next(iter(board.nets))
+            action = _measure_waveform_action(board, action_net)
         finding = {
             "id": f"finding_{len(session.data['findings']) + 1:03d}",
             "timestamp": utc_now(),
@@ -93,7 +121,9 @@ class RuleBasedModelAdapter:
             "confidence": confidence,
             "severity": severity,
             "evidence": evidence,
-            "related_nets": sorted(related_nets | set(low_voltage_rails) | {action_net}),
+            "related_nets": sorted(
+                related_nets | set(low_voltage_rails) | set(over_voltage_rails) | set(ripple_rails) | {action_net}
+            ),
             "related_components": [item["designator"] for item in topology.components_on_net(action_net)],
         }
         return validate_model_output({"finding": finding, "next_actions": [action]}, board)
@@ -261,3 +291,17 @@ def _first_point_for(board: BoardContext, net: str, measurement: str) -> dict[st
         if point["net"] == net and (measurement in allowed or not allowed):
             return point
     return None
+
+
+def _measure_waveform_action(board: BoardContext, net: str) -> dict[str, Any]:
+    point = _first_point_for(board, net, "waveform")
+    risk_level = board.nets[net].get("risk_level", "low")
+    return {
+        "type": "measure_net",
+        "net": net,
+        "test_point": point.get("id") if point else None,
+        "instrument_kind": "oscilloscope",
+        "reason": "Check converter switching behavior before changing power conditions.",
+        "risk_level": risk_level,
+        "requires_confirmation": risk_level == "high",
+    }

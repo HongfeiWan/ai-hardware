@@ -135,6 +135,8 @@ class MockScope:
                 envelope = min(1.0, phase * 8.0)
                 collapse = 1.0 if (phase % 0.42) < 0.28 else 0.18
                 voltage = min(nominal * 0.34, nominal) * envelope * collapse
+            elif any(token in symptom_l for token in ("overvoltage", "too high", "exceeds")) and expected_voltage:
+                voltage = float(expected_voltage["max"]) * 1.18 + nominal * 0.01 * sin(2 * pi * 4 * phase)
             elif "ripple" in symptom_l:
                 voltage = nominal + nominal * 0.06 * sin(2 * pi * 12 * phase)
             elif net.upper().endswith("SW_NODE"):

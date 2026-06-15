@@ -16,9 +16,20 @@
       "board": "examples/boards/usb_power_stage.yaml",
       "symptom": "3V3 rail ripple appears excessive during startup.",
       "expected": {
-        "severity": ["info", "warning", "fault"]
+        "severity": "warning",
+        "summary_contains": "ripple",
+        "next_action_net": "SW_NODE"
+      }
+    },
+    {
+      "id": "usb_power_stage_vout_overvoltage",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail overvoltage exceeds the configured maximum during startup.",
+      "expected": {
+        "severity": "critical",
+        "summary_contains": "above",
+        "next_action_type": "stop"
       }
     }
   ]
 }
-

@@ -92,6 +92,9 @@ def _check_expected(expected: dict[str, Any], finding: dict[str, Any], actions: 
     next_action_net = expected.get("next_action_net")
     if next_action_net and not any(action.get("net") == next_action_net for action in actions):
         errors.append(f"no next action targets net {next_action_net}")
+    next_action_type = expected.get("next_action_type")
+    if next_action_type and not any(action.get("type") == next_action_type for action in actions):
+        errors.append(f"no next action has type {next_action_type}")
     return errors
 
 
@@ -100,4 +103,3 @@ def write_regression_result(result: dict[str, Any], output: str | Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return target
-
