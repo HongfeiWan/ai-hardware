@@ -296,7 +296,7 @@ class MockDmm:
                 net_u.startswith("EN") or "_EN" in net_u
             ):
                 return 0.0
-            if any(token in symptom_l for token in ("does not stay", "collapse", "low", "brownout")) and net_u in {
+            if any(token in symptom_l for token in ("does not stay", "collapse", "brownout")) and net_u in {
                 "VOUT_3V3",
                 "3V3",
             }:

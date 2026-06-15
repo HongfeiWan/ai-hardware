@@ -176,13 +176,14 @@ class BenchPrototypeTest(unittest.TestCase):
     def test_plan_initial_measurements_writes_low_risk_actions(self) -> None:
         app = BenchApp()
         app.load_board_context_tool(str(BOARD))
-        result = app.call_tool("plan_initial_measurements", {"max_actions": 6})
+        result = app.call_tool("plan_initial_measurements", {"max_actions": 10})
         self.assertTrue(result["ok"])
         self.assertGreaterEqual(result["count"], 4)
         self.assertEqual(app.session.data["next_actions"], result["next_actions"])
         self.assertEqual(result["next_actions"][0]["measurement_kind"], "impedance")
         action_nets = {action.get("net") for action in result["next_actions"]}
         self.assertIn("VOUT_3V3", action_nets)
+        self.assertIn("VDD_1V8", action_nets)
         self.assertIn("PG_3V3", action_nets)
         self.assertNotIn("SW_NODE", action_nets)
         self.assertTrue(all(action["risk_level"] in {"low", "medium"} for action in result["next_actions"]))
@@ -611,6 +612,25 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertEqual(board.board_id, "csv_demo")
             self.assertIn("VIN", board.nets)
             self.assertEqual(board.test_points["TP1"]["net"], "VIN")
+
+    def test_import_bom_csv_to_board_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "bom.csv"
+            output = Path(tmp) / "board.json"
+            source.write_text(
+                "references,value,mpn,footprint,type\n"
+                "\"R1 R2\",10k,RC0603FR-0710KL,0603,resistor\n"
+                "U1,MCU,MCU-123,QFN32,microcontroller\n",
+                encoding="utf-8",
+            )
+            result = import_board(source, "bom", "bom_demo", "BOM Demo", output)
+            self.assertTrue(result["ok"])
+            board = load_board_context(output)
+            self.assertEqual(board.board_id, "bom_demo")
+            self.assertIn("UNASSIGNED", board.nets)
+            self.assertEqual(board.components["R1"]["part_number"], "RC0603FR-0710KL")
+            self.assertEqual(board.components["R2"]["package"], "0603")
+            self.assertEqual(board.components["U1"]["type"], "microcontroller")
 
     def test_import_kicad_xml_to_board_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

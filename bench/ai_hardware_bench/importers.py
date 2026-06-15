@@ -20,6 +20,8 @@ def import_board(
 ) -> dict[str, Any]:
     if source_format == "csv":
         context = import_testpoint_csv(source, board_id, board_name)
+    elif source_format in {"bom", "bom-csv", "bom-tsv"}:
+        context = import_bom_csv(source, board_id, board_name)
     elif source_format in {"kicad", "kicad-xml"}:
         context = import_kicad_xml_netlist(source, board_id, board_name)
     else:
@@ -93,6 +95,37 @@ def import_testpoint_csv(source: str | Path, board_id: str, board_name: str) -> 
             "pins": [{"name": name, "net": name} for name in nets],
         }
     return _context(board_id, board_name, source, list(nets.values()), list(components.values()), test_points)
+
+
+def import_bom_csv(source: str | Path, board_id: str, board_name: str) -> dict[str, Any]:
+    components: dict[str, dict[str, Any]] = {}
+    with Path(source).open("r", encoding="utf-8", newline="") as handle:
+        sample = handle.read(4096)
+        handle.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+        except csv.Error:
+            dialect = csv.excel_tab if Path(source).suffix.lower() in {".tsv", ".tab"} else csv.excel
+        reader = csv.DictReader(handle, dialect=dialect)
+        if not reader.fieldnames:
+            raise ValueError("BOM file is missing a header row")
+        for row_no, row in enumerate(reader, start=2):
+            refs = _split_refs(_first(row, "designator", "ref", "references", "reference", "refs"))
+            if not refs:
+                raise ValueError(f"BOM row {row_no} is missing designator/ref/references")
+            for ref in refs:
+                components[ref] = {
+                    "designator": ref,
+                    "type": _first(row, "component_type", "type", "category") or "bom_item",
+                    "value": _first(row, "value", "comment", "description"),
+                    "part_number": _first(row, "part_number", "mpn", "manufacturer_part_number", "part"),
+                    "package": _first(row, "package", "footprint", "pcb_footprint"),
+                    "pins": [],
+                }
+    if not components:
+        raise ValueError("BOM file did not contain any components")
+    nets = [{"name": "UNASSIGNED", "domain": "unknown", "risk_level": "low", "notes": "BOM import has no netlist data."}]
+    return _context(board_id, board_name, source, nets, list(components.values()), [])
 
 
 def import_kicad_xml_netlist(source: str | Path, board_id: str, board_name: str) -> dict[str, Any]:
@@ -179,6 +212,16 @@ def _split_list(value: str) -> list[str]:
     return [item.strip() for item in value.replace(";", ",").split(",") if item.strip()]
 
 
+def _split_refs(value: str) -> list[str]:
+    if not value:
+        return []
+    normalized = value.replace(";", ",")
+    refs: list[str] = []
+    for chunk in normalized.split(","):
+        refs.extend(item.strip() for item in chunk.split() if item.strip())
+    return refs
+
+
 def _child_text(element: ET.Element, path: str) -> str:
     child = element.find(path)
     return child.text.strip() if child is not None and child.text else ""
@@ -191,4 +234,3 @@ def _guess_domain(name: str) -> str:
     if upper.startswith(("VCC", "VBUS", "VIN", "VOUT", "+", "3V3", "5V")):
         return "power"
     return "unknown"
-

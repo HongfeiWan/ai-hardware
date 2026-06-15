@@ -453,6 +453,7 @@ def render_console_html(state: ConsoleState) -> str:
         <label>Format
           <select id="import-format">
             <option value="csv">CSV</option>
+            <option value="bom">BOM CSV/TSV</option>
             <option value="kicad">KiCad XML</option>
           </select>
         </label>
