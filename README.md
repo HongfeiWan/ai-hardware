@@ -157,6 +157,8 @@ python3 tools/bench.py serve --board examples/boards/usb_power_stage.yaml
 
 首批 bench 工具覆盖 `load_board_context`、`instrument_status`、`model_status`、`safety_status`、`validate_session`、`read_audit_log`、`list_nets`、`trace_net_neighbors`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux` 和 `esp32_reset_dut`。`demo` 会生成 mock 波形 CSV、session JSON、诊断 finding、下一步测量建议和 JSONL 审计日志。
 
+stdio MCP server 支持 `tools/list`、`tools/call`、`resources/list`、`resources/read`、`prompts/list` 和 `prompts/get`。当前 prompts 包括 `diagnose_power_rail`、`diagnose_boot_sequence` 和 `plan_next_measurement`，会把已加载的 board/session/topology/measurement 摘要整理成可发给模型的结构化提示。
+
 安全策略默认拒绝未确认的高风险动作：例如 `SW_NODE` 这种 `risk_level: high` 的波形采集，或非 dry-run 的电源/夹具动作。确实要执行时，需要显式传入 `confirm: true`：
 
 ```bash

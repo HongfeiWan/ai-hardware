@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 from .bench import BenchApp, to_mcp_tool_result
+from .prompts import get_prompt, list_prompts
 
 
 class StdioJsonRpcServer:
@@ -98,13 +99,15 @@ class StdioJsonRpcServer:
                 ]
             }
         if method == "prompts/list":
-            return {
-                "prompts": [
-                    {"name": "diagnose_power_rail", "description": "Summarize power rail evidence and next measurements."},
-                    {"name": "diagnose_boot_sequence", "description": "Reason about power-good, reset and enable ordering."},
-                    {"name": "plan_next_measurement", "description": "Choose the next low-risk measurement."},
-                ]
-            }
+            return {"prompts": list_prompts()}
+        if method == "prompts/get":
+            name = params.get("name")
+            arguments = params.get("arguments") or {}
+            if not isinstance(name, str):
+                raise ValueError("prompts/get name must be a string")
+            if not isinstance(arguments, dict):
+                raise ValueError("prompts/get arguments must be an object")
+            return get_prompt(self.app, name, arguments)
         raise ValueError(f"Unsupported JSON-RPC method: {method}")
 
     def _read_message(self) -> dict[str, Any] | None:

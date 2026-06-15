@@ -120,7 +120,7 @@ def _render_report(session: dict[str, Any], session_path: Path, audit_events: li
     </section>
     <section>
       <h2>Artifacts</h2>
-      {_artifacts_table(artifacts)}
+      {_artifacts_table(artifacts, session_path.parent)}
     </section>
     <section>
       <h2>Audit</h2>
@@ -179,18 +179,20 @@ def _actions_table(actions: list[dict[str, Any]]) -> str:
     return _table(["Type", "Net", "Risk", "Confirm", "Reason"], rows)
 
 
-def _artifacts_table(artifacts: list[dict[str, Any]]) -> str:
+def _artifacts_table(artifacts: list[dict[str, Any]], base_dir: Path | None = None) -> str:
     rows = []
     for artifact in artifacts:
+        preview = _artifact_preview(artifact, base_dir)
         rows.append(
             "<tr>"
             f"<td><code>{escape(str(artifact.get('id', '')))}</code></td>"
             f"<td>{escape(str(artifact.get('kind', '')))}</td>"
             f"<td><code>{escape(str(artifact.get('uri', '')))}</code></td>"
             f"<td><code>{escape(str(artifact.get('sha256', '')))}</code></td>"
+            f"<td>{preview}</td>"
             "</tr>"
         )
-    return _table(["ID", "Kind", "URI", "SHA-256"], rows)
+    return _table(["ID", "Kind", "URI", "SHA-256", "Preview"], rows)
 
 
 def _audit_table(events: list[dict[str, Any]]) -> str:
@@ -223,3 +225,73 @@ def _load_audit(path: str | Path | None) -> list[dict[str, Any]]:
         return []
     return [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines() if line.strip()]
 
+
+def _artifact_preview(artifact: dict[str, Any], base_dir: Path | None) -> str:
+    if artifact.get("kind") != "waveform_csv":
+        return ""
+    path = _resolve_artifact_path(str(artifact.get("uri", "")), base_dir)
+    if path is None:
+        return "<span class=\"muted\">missing</span>"
+    try:
+        samples = _read_waveform_csv(path)
+    except Exception:
+        return "<span class=\"muted\">unreadable</span>"
+    if not samples:
+        return "<span class=\"muted\">empty</span>"
+    return _waveform_svg(samples)
+
+
+def _resolve_artifact_path(uri: str, base_dir: Path | None) -> Path | None:
+    if not uri:
+        return None
+    path = Path(uri)
+    candidates = [path]
+    if not path.is_absolute() and base_dir is not None:
+        candidates.append(base_dir / path)
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _read_waveform_csv(path: Path) -> list[tuple[float, float]]:
+    samples: list[tuple[float, float]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        header = handle.readline().strip().split(",")
+        if header[:2] != ["t_s", "voltage_V"]:
+            return []
+        for line in handle:
+            if not line.strip():
+                continue
+            t_s, voltage_v = line.strip().split(",", 1)
+            samples.append((float(t_s), float(voltage_v)))
+    return samples
+
+
+def _waveform_svg(samples: list[tuple[float, float]]) -> str:
+    width = 220
+    height = 64
+    padding = 6
+    stride = max(1, len(samples) // 160)
+    reduced = samples[::stride]
+    t_values = [point[0] for point in reduced]
+    v_values = [point[1] for point in reduced]
+    t_min, t_max = min(t_values), max(t_values)
+    v_min, v_max = min(v_values), max(v_values)
+    if t_max == t_min:
+        t_max = t_min + 1.0
+    if v_max == v_min:
+        v_max = v_min + 1.0
+    points = []
+    for t_s, voltage_v in reduced:
+        x = padding + (t_s - t_min) / (t_max - t_min) * (width - padding * 2)
+        y = height - padding - (voltage_v - v_min) / (v_max - v_min) * (height - padding * 2)
+        points.append(f"{x:.1f},{y:.1f}")
+    return (
+        f"<svg viewBox=\"0 0 {width} {height}\" width=\"{width}\" height=\"{height}\" "
+        "role=\"img\" aria-label=\"Waveform preview\">"
+        f"<rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" rx=\"6\" fill=\"#f8fafc\" stroke=\"#d7dde5\"/>"
+        f"<polyline points=\"{' '.join(points)}\" fill=\"none\" stroke=\"#0f766e\" stroke-width=\"2\"/>"
+        f"<text x=\"6\" y=\"58\" font-size=\"10\" fill=\"#5d6875\">{v_min:.3g}..{v_max:.3g} V</text>"
+        "</svg>"
+    )

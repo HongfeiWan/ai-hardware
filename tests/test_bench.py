@@ -72,6 +72,29 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["board_id"], "usb_power_stage_demo")
 
+    def test_mcp_prompts_list_and_get(self) -> None:
+        app = BenchApp()
+        app.demo(BOARD, "3V3 rail does not stay up after USB input is applied.")
+        server = StdioJsonRpcServer(app)
+        listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "prompts/list", "params": {}})
+        self.assertIsNotNone(listed)
+        prompt_names = {item["name"] for item in listed["result"]["prompts"]}
+        self.assertIn("diagnose_power_rail", prompt_names)
+
+        fetched = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "prompts/get",
+                "params": {"name": "diagnose_power_rail", "arguments": {"rail": "3V3_BUCK"}},
+            }
+        )
+        self.assertIsNotNone(fetched)
+        message = fetched["result"]["messages"][0]["content"]["text"]
+        self.assertIn("3V3_BUCK", message)
+        self.assertIn("USB Power Stage Demo", message)
+        self.assertIn("Relevant measurements", message)
+
     def test_instrument_status_defaults_to_mock(self) -> None:
         app = BenchApp()
         status = app.instrument_status()
@@ -123,6 +146,8 @@ class BenchPrototypeTest(unittest.TestCase):
             html = report_path.read_text(encoding="utf-8")
             self.assertIn("AI Hardware Report", html)
             self.assertIn("VOUT_3V3", html)
+            self.assertIn("Waveform preview", html)
+            self.assertIn("<polyline", html)
 
     def test_web_console_status_and_demo_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
