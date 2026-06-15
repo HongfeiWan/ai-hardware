@@ -126,7 +126,7 @@ python3 tools/deploy.py load-net-map --wait-ready 30 --clear-existing \
 
 ## Python Bench 原型
 
-Python 测试站原型在 [bench/ai_hardware_bench](bench/ai_hardware_bench)。这一层不依赖 ESP32 实机，也不强制安装 `mcp`、`fastmcp`、`yaml` 或 `jsonschema`；当前实现用标准库完成板级文件加载、轻量校验、拓扑查询、mock PSU、mock scope、mock fixture、波形特征提取、规则诊断和 MCP-shaped stdio JSON-RPC 入口。
+Python 测试站原型在 [bench/ai_hardware_bench](bench/ai_hardware_bench)。这一层不依赖 ESP32 实机，也不强制安装 `mcp`、`fastmcp`、`yaml` 或 `jsonschema`；当前实现用标准库完成板级文件加载、轻量校验、拓扑查询、mock PSU、mock scope、mock fixture、波形特征提取、规则诊断、CSV/KiCad XML 导入和 MCP-shaped stdio JSON-RPC 入口。
 
 常用命令：
 
@@ -135,19 +135,118 @@ python3 tools/bench.py validate-board examples/boards/usb_power_stage.yaml
 python3 tools/bench.py demo \
   --board examples/boards/usb_power_stage.yaml \
   --output-session artifacts/mock-bench/session.json
+python3 tools/bench.py validate-session artifacts/mock-bench/session.json
+python3 tools/bench.py run-regression
+python3 tools/bench.py run-regression \
+  --suite examples/regressions/usb_power_stage.json \
+  --artifact-dir artifacts/regression-suite \
+  --output artifacts/regression-suite/result.json
+python3 tools/bench.py report \
+  --session artifacts/regression-suite/usb_power_stage_vout_collapse/session.json \
+  --output artifacts/regression-suite/usb_power_stage_vout_collapse/report.html \
+  --audit artifacts/regression-suite/usb_power_stage_vout_collapse/audit.jsonl
+python3 tools/bench.py console \
+  --board examples/boards/usb_power_stage.yaml \
+  --artifact-dir artifacts/console
+python3 tools/bench.py check --output artifacts/check/result.json
 python3 tools/bench.py call-tool list_nets \
   --board examples/boards/usb_power_stage.yaml \
   --arguments '{"domain":"power"}'
 python3 tools/bench.py serve --board examples/boards/usb_power_stage.yaml
 ```
 
-首批 bench 工具覆盖 `load_board_context`、`list_nets`、`trace_net_neighbors`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux` 和 `esp32_reset_dut`。`demo` 会生成 mock 波形 CSV、session JSON、诊断 finding 和下一步测量建议；后续接入真实仪器时，可以保留工具契约，把 mock driver 替换为 PyVISA/SCPI driver。
+首批 bench 工具覆盖 `load_board_context`、`instrument_status`、`model_status`、`safety_status`、`validate_session`、`read_audit_log`、`list_nets`、`trace_net_neighbors`、`set_power_rail`、`capture_waveform`、`extract_signal_features`、`diagnose_hardware`、`suggest_next_probe`、`esp32_set_mux` 和 `esp32_reset_dut`。`demo` 会生成 mock 波形 CSV、session JSON、诊断 finding、下一步测量建议和 JSONL 审计日志。
+
+安全策略默认拒绝未确认的高风险动作：例如 `SW_NODE` 这种 `risk_level: high` 的波形采集，或非 dry-run 的电源/夹具动作。确实要执行时，需要显式传入 `confirm: true`：
+
+```bash
+python3 tools/bench.py call-tool capture_waveform \
+  --board examples/boards/usb_power_stage.yaml \
+  --arguments '{"net":"SW_NODE","confirm":true}'
+```
+
+审计和 session 校验：
+
+```bash
+python3 tools/bench.py call-tool safety_status --board examples/boards/usb_power_stage.yaml
+python3 tools/bench.py call-tool read_audit_log --board examples/boards/usb_power_stage.yaml
+python3 tools/bench.py validate-session artifacts/mock-bench/session.json
+```
+
+可回归诊断任务集放在 [examples/regressions](examples/regressions)。`run-regression --suite` 会逐个运行任务、保存 session/artifact/audit，并检查预期 severity、summary 片段和下一步测量网标。`report` 会把 session 和 audit 汇总成一个静态 HTML 报告，便于回看诊断证据、测量特征、artifact 引用和工具调用记录。
+
+`console` 会启动一个仅绑定本机的轻量 Web 控制台，默认地址是 `http://127.0.0.1:8766`。控制台可以查看当前板卡摘要、仪器/model 状态，运行 mock demo 或 regression，并打开生成的 HTML 报告。它只依赖 Python 标准库，适合先作为 notebook/Web 控制台之前的本地工程台面。
+
+`check` 是无硬件质量门槛，会依次执行板卡校验、Python 编译、单元测试、回归 suite、HTML 报告生成，并在存在 ESP32 bundle 时验证 `firmware/esp32-fixture/dist/esp32-fixture.zip`。在没有 ESP32 bundle 的环境里可加 `--skip-esp32-bundle`。
+
+导入板级上下文：
+
+```bash
+python3 tools/bench.py import-board \
+  --format csv \
+  --input path/to/testpoints.csv \
+  --output artifacts/imported-board.json \
+  --board-id imported_demo \
+  --name "Imported Demo"
+
+python3 tools/bench.py import-board \
+  --format kicad \
+  --input path/to/netlist.xml \
+  --output artifacts/imported-kicad-board.json \
+  --board-id imported_kicad \
+  --name "Imported KiCad Board"
+```
+
+默认 driver 是 mock；要试接真实 SCPI 仪器，可以传一个 JSON 配置。没有安装 PyVISA 或 VISA backend 时，只有显式启用 SCPI 才会报错，mock 流程不受影响。
+
+```json
+{
+  "psu": {
+    "backend": "scpi",
+    "id": "bench_psu",
+    "resource": "TCPIP::192.168.1.50::INSTR",
+    "channel": "CH1"
+  },
+  "scope": {
+    "backend": "scpi",
+    "id": "bench_scope",
+    "resource": "TCPIP::192.168.1.60::INSTR",
+    "channel": "CHANnel1"
+  }
+}
+```
+
+```bash
+python3 tools/bench.py call-tool instrument_status \
+  --board examples/boards/usb_power_stage.yaml \
+  --instrument-config instruments.local.json
+```
+
+模型适配默认使用本地规则引擎。要接本地或私有模型网关，可以使用通用 HTTP JSON adapter；该 endpoint 收到 board/session/topology JSON，并返回 `finding` 和 `next_actions`。
+
+```json
+{
+  "backend": "json_http",
+  "id": "local_model_gateway",
+  "endpoint": "http://127.0.0.1:8080/diagnose",
+  "timeout_s": 30
+}
+```
+
+```bash
+python3 tools/bench.py call-tool model_status \
+  --board examples/boards/usb_power_stage.yaml \
+  --model-config model.local.json
+```
 
 本机无硬件检查：
 
 ```bash
 PYTHONPATH=bench python3 -m unittest discover -s tests
 python3 -m py_compile $(rg --files -g '*.py')
+python3 tools/bench.py run-regression
+python3 tools/bench.py run-regression --suite examples/regressions/usb_power_stage.json
+python3 tools/bench.py check --output artifacts/check/result.json
 ```
 
 ## 核心 MCP 表面

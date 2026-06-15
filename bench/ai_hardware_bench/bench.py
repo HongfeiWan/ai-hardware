@@ -10,6 +10,9 @@ from typing import Any, Callable
 
 from .data import BoardContext, DiagnosticSession, load_board_context, utc_now
 from .instruments import MockFixture, build_psu_driver, build_scope_driver, extract_waveform_features
+from .model import build_model_adapter
+from .safety import AuditLogger, SafetyPolicy
+from .session import validate_session, validate_session_file
 from .topology import Topology
 
 
@@ -23,18 +26,28 @@ class BenchApp:
         self,
         artifact_dir: str | Path = "artifacts/mock-bench",
         instrument_config: dict[str, Any] | str | Path | None = None,
+        model_config: dict[str, Any] | str | Path | None = None,
+        audit_path: str | Path | None = None,
     ) -> None:
         self.artifact_dir = Path(artifact_dir)
+        self.audit = AuditLogger(audit_path or self.artifact_dir / "audit.jsonl")
+        self.safety = SafetyPolicy()
         self.board: BoardContext | None = None
         self.topology: Topology | None = None
         self.session: DiagnosticSession | None = None
         config = _load_instrument_config(instrument_config)
+        model = _load_json_config(model_config, "model config")
         self.psu = build_psu_driver(config.get("psu"))
         self.scope = build_scope_driver(config.get("scope"))
         self.fixture = MockFixture()
+        self.model = build_model_adapter(model)
         self.tools: dict[str, ToolFunc] = {
             "load_board_context": self.load_board_context_tool,
             "instrument_status": self.instrument_status,
+            "model_status": self.model_status,
+            "safety_status": self.safety_status,
+            "validate_session": self.validate_session_tool,
+            "read_audit_log": self.read_audit_log,
             "list_nets": self.list_nets,
             "trace_net_neighbors": self.trace_net_neighbors,
             "set_power_rail": self.set_power_rail,
@@ -97,6 +110,23 @@ class BenchApp:
                 {"id": "mock_fixture", "kind": "esp32_fixture", "backend": "mock"},
             ],
         }
+
+    def model_status(self) -> dict[str, Any]:
+        return {"ok": True, "model": self.model.status()}
+
+    def safety_status(self) -> dict[str, Any]:
+        return {"ok": True, "policy": self.safety.status(), "audit_path": str(self.audit.path)}
+
+    def validate_session_tool(self, path: str | None = None, check_artifacts: bool = True) -> dict[str, Any]:
+        if path:
+            return validate_session_file(path, check_artifacts=check_artifacts)
+        session = self.require_session()
+        errors = validate_session(session.data, check_artifacts=check_artifacts)
+        return {"ok": not errors, "session_id": session.session_id, "errors": errors}
+
+    def read_audit_log(self, limit: int | None = 50) -> dict[str, Any]:
+        events = self.audit.read(limit=limit)
+        return {"ok": True, "events": events, "count": len(events)}
 
     def list_nets(self, domain: str | None = None, risk_level: str | None = None) -> dict[str, Any]:
         nets = self.require_topology().list_nets(domain=domain, risk_level=risk_level)
@@ -232,7 +262,9 @@ class BenchApp:
     def diagnose_hardware(self) -> dict[str, Any]:
         board = self.require_board()
         session = self.require_session()
-        finding, next_actions = self._diagnose_from_session(board, session)
+        result = self.model.analyze(board, session, self.require_topology())
+        finding = result["finding"]
+        next_actions = result["next_actions"]
         session.add_finding(finding)
         session.set_next_actions(next_actions)
         return {"ok": True, "finding": finding, "next_actions": next_actions}
@@ -306,7 +338,18 @@ class BenchApp:
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         if name not in self.tools:
             raise ValueError(f"Unknown tool: {name}")
-        return self.tools[name](**(arguments or {}))
+        tool_arguments = dict(arguments or {})
+        decision = self.safety.evaluate(name, tool_arguments, self.board)
+        try:
+            decision.require_allowed()
+            call_arguments = dict(tool_arguments)
+            call_arguments.pop("confirm", None)
+            result = self.tools[name](**call_arguments)
+            self.audit.record(name, tool_arguments, "ok", decision=decision)
+            return result
+        except Exception as exc:
+            self.audit.record(name, tool_arguments, "error", decision=decision, error=str(exc))
+            raise
 
     def list_tools(self) -> list[dict[str, Any]]:
         return [
@@ -314,6 +357,10 @@ class BenchApp:
             for name, description in {
                 "load_board_context": "Load and validate a board context file.",
                 "instrument_status": "Report configured bench instrument backends.",
+                "model_status": "Report configured model adapter backend.",
+                "safety_status": "Report safety policy and audit log location.",
+                "validate_session": "Validate the current or saved diagnostic session.",
+                "read_audit_log": "Read recent JSONL audit events.",
                 "list_nets": "List nets with optional domain/risk filters.",
                 "trace_net_neighbors": "Trace component, rail and test point neighbors for a net.",
                 "set_power_rail": "Safety-check and mock a programmable PSU rail action.",
@@ -349,7 +396,8 @@ class BenchApp:
     def save_session(self, path: str | Path) -> dict[str, Any]:
         session = self.require_session()
         target = session.save(path)
-        return {"ok": True, "path": str(target)}
+        validation = validate_session_file(target, check_artifacts=True)
+        return {"ok": validation["ok"], "path": str(target), "validation_errors": validation["errors"]}
 
     def demo(self, board_path: str | Path, symptom: str, output_session: str | Path | None = None) -> dict[str, Any]:
         loaded = self.load_board_context_tool(str(board_path), observed_symptom=symptom)
@@ -357,16 +405,19 @@ class BenchApp:
         first_rail = next(iter(board.rails.values()), None)
         if first_rail:
             rail_limit = first_rail.get("current_limit") or {"max": 0.2}
-            self.set_power_rail(
-                first_rail["name"],
-                float(first_rail.get("nominal_voltage", 5.0)),
-                min(float(rail_limit.get("max", 0.2)), 0.18),
-                True,
-                dry_run=True,
+            self.call_tool(
+                "set_power_rail",
+                {
+                    "rail": first_rail["name"],
+                    "voltage_V": float(first_rail.get("nominal_voltage", 5.0)),
+                    "current_limit_A": min(float(rail_limit.get("max", 0.2)), 0.18),
+                    "output": True,
+                    "dry_run": True,
+                },
             )
         preferred = "VOUT_3V3" if "VOUT_3V3" in board.nets else next(iter(board.nets))
-        waveform = self.capture_waveform(preferred, sample_count=512, duration_s=0.02)
-        diagnosis = self.diagnose_hardware()
+        waveform = self.call_tool("capture_waveform", {"net": preferred, "sample_count": 512, "duration_s": 0.02})
+        diagnosis = self.call_tool("diagnose_hardware", {})
         saved = None
         if output_session:
             saved = self.save_session(output_session)
@@ -491,6 +542,10 @@ def _sha256_file(path: Path) -> str:
 
 
 def _load_instrument_config(config: dict[str, Any] | str | Path | None) -> dict[str, Any]:
+    return _load_json_config(config, "instrument config")
+
+
+def _load_json_config(config: dict[str, Any] | str | Path | None, label: str) -> dict[str, Any]:
     if config is None:
         return {}
     if isinstance(config, dict):
@@ -499,7 +554,7 @@ def _load_instrument_config(config: dict[str, Any] | str | Path | None) -> dict[
     with path.open("r", encoding="utf-8") as handle:
         loaded = json.load(handle)
     if not isinstance(loaded, dict):
-        raise ValueError(f"Instrument config must be a JSON object: {path}")
+        raise ValueError(f"{label} must be a JSON object: {path}")
     return loaded
 
 

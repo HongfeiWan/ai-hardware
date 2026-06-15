@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1.0",
+  "tasks": [
+    {
+      "id": "usb_power_stage_vout_collapse",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail does not stay up after USB input is applied.",
+      "expected": {
+        "severity": ["warning", "fault"],
+        "summary_contains": "VOUT_3V3",
+        "next_action_net": "SW_NODE"
+      }
+    },
+    {
+      "id": "usb_power_stage_ripple_check",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail ripple appears excessive during startup.",
+      "expected": {
+        "severity": ["info", "warning", "fault"]
+      }
+    }
+  ]
+}
+

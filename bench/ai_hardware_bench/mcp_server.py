@@ -130,10 +130,12 @@ class StdioJsonRpcServer:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the AI Hardware bench MCP stdio server.")
     parser.add_argument("--artifact-dir", default="artifacts/mock-bench")
+    parser.add_argument("--instrument-config")
+    parser.add_argument("--model-config")
     parser.add_argument("--board")
     parser.add_argument("--symptom", default="unspecified symptom")
     args = parser.parse_args(argv)
-    app = BenchApp(args.artifact_dir)
+    app = BenchApp(args.artifact_dir, instrument_config=args.instrument_config, model_config=args.model_config)
     if args.board:
         app.load_board_context_tool(args.board, observed_symptom=args.symptom)
     StdioJsonRpcServer(app).serve_forever()
@@ -142,4 +144,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
