@@ -52,6 +52,12 @@ class RuleBasedModelAdapter:
         low_power_good_nets: list[str] = []
         shorted_nets: list[str] = []
         inactive_switch_nodes: list[str] = []
+        stuck_reset_nets: list[str] = []
+        missing_clock_nets: list[str] = []
+        stuck_bus_nets: list[str] = []
+        low_dc_voltage_nets: list[str] = []
+        nominal_dc_voltage_nets: set[str] = set()
+        ldo_output_faults: list[tuple[dict[str, Any], str]] = []
         current_limited = False
         for measurement in session.data["measurements"]:
             target_net = measurement.get("target", {}).get("net")
@@ -91,16 +97,35 @@ class RuleBasedModelAdapter:
             if measurement.get("kind") == "dc_voltage" and target_net in board.nets:
                 expected = board.nets[target_net].get("expected_voltage")
                 voltage = features.get("voltage_V")
-                if expected and voltage is not None and voltage < float(expected["min"]):
-                    for rail in board.rails.values():
-                        if rail.get("enable_net") == target_net:
-                            low_enable_nets.append(target_net)
-                            evidence.append(
-                                f"{target_net} measures {voltage} V, below the enable threshold {expected['min']} V."
-                            )
+                if expected and voltage is not None:
+                    if voltage < float(expected["min"]):
+                        low_dc_voltage_nets.append(target_net)
+                        for rail in board.rails.values():
+                            if rail.get("enable_net") == target_net:
+                                low_enable_nets.append(target_net)
+                                evidence.append(
+                                    f"{target_net} measures {voltage} V, below the enable threshold {expected['min']} V."
+                                )
+                    elif voltage <= float(expected["max"]):
+                        nominal_dc_voltage_nets.add(target_net)
             if measurement.get("kind") == "logic" and target_net in board.nets:
+                net_info = board.nets[target_net]
                 high_fraction = features.get("high_fraction")
+                transition_count = features.get("transition_count")
                 stuck_low = bool(features.get("stuck_low", False))
+                stuck_high = bool(features.get("stuck_high", False))
+                if _is_clock_net(net_info) and (
+                    stuck_low
+                    or stuck_high
+                    or (isinstance(transition_count, int) and transition_count == 0)
+                ):
+                    missing_clock_nets.append(target_net)
+                    evidence.append(
+                        f"{target_net} clock capture has no transitions with high_fraction={high_fraction}."
+                    )
+                if _is_bus_net(net_info) and stuck_low:
+                    stuck_bus_nets.append(target_net)
+                    evidence.append(f"{target_net} bus capture remains low with high_fraction={high_fraction}.")
                 if stuck_low or (isinstance(high_fraction, (int, float)) and high_fraction < 0.5):
                     for rail in board.rails.values():
                         if rail.get("power_good_net") == target_net:
@@ -108,12 +133,23 @@ class RuleBasedModelAdapter:
                             evidence.append(
                                 f"{target_net} logic capture remains low with high_fraction={high_fraction}."
                             )
+                if _is_reset_net(board, target_net) and (
+                    stuck_low or (isinstance(high_fraction, (int, float)) and high_fraction < 0.5)
+                ):
+                    stuck_reset_nets.append(target_net)
+                    evidence.append(f"{target_net} reset capture remains low with high_fraction={high_fraction}.")
             if measurement.get("kind") == "impedance" and target_net in board.nets:
                 resistance = features.get("resistance_ohm")
                 short_to_ground = bool(features.get("short_to_ground", False))
                 if short_to_ground or (isinstance(resistance, (int, float)) and resistance < 10.0):
                     shorted_nets.append(target_net)
                     evidence.append(f"{target_net} measures {resistance} ohm to ground with power off.")
+        for rail in board.rails.values():
+            output_net = rail.get("output_net")
+            source_net = rail.get("source_net")
+            if output_net in low_dc_voltage_nets and source_net in nominal_dc_voltage_nets and _is_ldo_rail(board, rail):
+                ldo_output_faults.append((rail, str(output_net)))
+                evidence.append(f"{output_net} is low while upstream source net {source_net} is in range.")
         if shorted_nets:
             action_net = shorted_nets[0]
             summary = f"{action_net} appears shorted to ground; do not apply power until the fault is isolated."
@@ -136,6 +172,62 @@ class RuleBasedModelAdapter:
                 "net": action_net,
                 "component": component.get("designator") if component else None,
                 "reason": "Switching node waveform lacks expected pulses; inspect the converter control and bootstrap path.",
+                "risk_level": board.nets[action_net].get("risk_level", "low"),
+                "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
+            }
+        elif stuck_reset_nets:
+            action_net = stuck_reset_nets[0]
+            summary = f"{action_net} remains asserted; downstream logic is likely held in reset."
+            confidence = 0.67
+            severity = "fault"
+            component = _first_component_on_net(board, action_net)
+            action = {
+                "type": "inspect_component",
+                "net": action_net,
+                "component": component.get("designator") if component else None,
+                "reason": "Reset line did not release; inspect reset supervisor, pull-up and reset source.",
+                "risk_level": board.nets[action_net].get("risk_level", "low"),
+                "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
+            }
+        elif missing_clock_nets:
+            action_net = missing_clock_nets[0]
+            summary = f"{action_net} has no detected clock transitions; inspect the oscillator or clock source."
+            confidence = 0.66
+            severity = "fault"
+            component = _first_component_on_net(board, action_net)
+            action = {
+                "type": "inspect_component",
+                "net": action_net,
+                "component": component.get("designator") if component else None,
+                "reason": "Expected clock net is static; inspect the crystal, oscillator enable path and MCU clock pins.",
+                "risk_level": board.nets[action_net].get("risk_level", "low"),
+                "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
+            }
+        elif stuck_bus_nets:
+            action_net = stuck_bus_nets[0]
+            summary = f"{action_net} is held low; inspect the bus pull-ups and attached devices."
+            confidence = 0.65
+            severity = "fault"
+            component = _first_component_on_net(board, action_net)
+            action = {
+                "type": "inspect_component",
+                "net": action_net,
+                "component": component.get("designator") if component else None,
+                "reason": "Bus line is static low; isolate attached devices and verify pull-ups before further bus traffic.",
+                "risk_level": board.nets[action_net].get("risk_level", "low"),
+                "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
+            }
+        elif ldo_output_faults:
+            affected_rail, action_net = ldo_output_faults[0]
+            summary = f"{action_net} is low while the LDO input is in range; inspect the regulator and load."
+            confidence = 0.7
+            severity = "fault"
+            component = _first_regulator_for_rail(board, affected_rail) or _first_component_on_net(board, action_net)
+            action = {
+                "type": "inspect_component",
+                "net": action_net,
+                "component": component.get("designator") if component else None,
+                "reason": "LDO input is present but output is below range; inspect enable, dropout, output capacitor and downstream load.",
                 "risk_level": board.nets[action_net].get("risk_level", "low"),
                 "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
             }
@@ -227,6 +319,11 @@ class RuleBasedModelAdapter:
                 | set(low_power_good_nets)
                 | set(shorted_nets)
                 | set(inactive_switch_nodes)
+                | set(stuck_reset_nets)
+                | set(missing_clock_nets)
+                | set(stuck_bus_nets)
+                | set(low_dc_voltage_nets)
+                | {str(rail.get("source_net")) for rail, _ in ldo_output_faults if rail.get("source_net")}
                 | {action_net}
             ),
             "related_components": [item["designator"] for item in topology.components_on_net(action_net)],
@@ -406,10 +503,64 @@ def _first_component_on_net(board: BoardContext, net: str) -> dict[str, Any] | N
     return None
 
 
+def _first_regulator_for_rail(board: BoardContext, rail: dict[str, Any]) -> dict[str, Any] | None:
+    source_net = rail.get("source_net")
+    output_net = rail.get("output_net")
+    for component in board.components.values():
+        ctype = str(component.get("type", "")).lower()
+        if "ldo" not in ctype and "regulator" not in ctype:
+            continue
+        pins = component.get("pins", []) or []
+        has_source = any(pin.get("net") == source_net for pin in pins)
+        has_output = any(pin.get("net") == output_net for pin in pins)
+        if has_source and has_output:
+            return component
+    return None
+
+
+def _is_ldo_rail(board: BoardContext, rail: dict[str, Any]) -> bool:
+    name = str(rail.get("name", "")).lower()
+    if "ldo" in name:
+        return True
+    return _first_regulator_for_rail(board, rail) is not None
+
+
 def _is_switching_node(net_info: dict[str, Any]) -> bool:
     name = str(net_info.get("name", "")).upper()
     notes = str(net_info.get("notes", "")).lower()
-    return bool(net_info.get("expected_frequency")) or "SW" in name or "switching" in notes
+    return "SW" in name or "switching" in notes
+
+
+def _is_clock_net(net_info: dict[str, Any]) -> bool:
+    name = str(net_info.get("name", "")).upper()
+    notes = str(net_info.get("notes", "")).lower()
+    return bool(net_info.get("expected_frequency")) and (
+        "CLK" in name or "CLOCK" in name or "XTAL" in name or "OSC" in name or "clock" in notes or "crystal" in notes
+    )
+
+
+def _is_bus_net(net_info: dict[str, Any]) -> bool:
+    name = str(net_info.get("name", "")).upper()
+    notes = str(net_info.get("notes", "")).lower()
+    return (
+        name.startswith(("I2C_", "SPI_"))
+        or name.endswith(("_SCL", "_SDA", "_SCK", "_MOSI", "_MISO", "_CS"))
+        or name in {"SCL", "SDA", "SCK", "MOSI", "MISO", "CS"}
+        or "i2c" in notes
+        or "spi" in notes
+        or "bus" in notes
+    )
+
+
+def _is_reset_net(board: BoardContext, net: str) -> bool:
+    net_u = net.upper()
+    if "RESET" in net_u or "NRST" in net_u or net_u.endswith("_RST") or net_u.endswith("RST_N"):
+        return True
+    for component in board.components.values():
+        for pin in component.get("pins", []) or []:
+            if pin.get("net") == net and "reset" in str(pin.get("function", "")).lower():
+                return True
+    return False
 
 
 def _waveform_inactive(v_max: Any, v_pp: Any) -> bool:

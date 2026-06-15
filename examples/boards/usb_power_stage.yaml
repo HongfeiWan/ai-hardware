@@ -49,6 +49,47 @@ nets:
       max: 3.4
       unit: V
     risk_level: low
+  - name: MCU_RESET_N
+    domain: digital
+    expected_voltage:
+      min: 2.4
+      max: 3.4
+      unit: V
+    risk_level: low
+    notes: Active-low reset for the downstream MCU load.
+  - name: MCU_CLK
+    domain: digital
+    expected_frequency:
+      min: 15.5
+      max: 16.5
+      unit: MHz
+    risk_level: low
+    notes: MCU reference clock from the local crystal or oscillator.
+  - name: I2C_SCL
+    domain: digital
+    expected_voltage:
+      min: 2.4
+      max: 3.4
+      unit: V
+    risk_level: low
+    notes: I2C clock bus with pull-up to 3V3.
+  - name: I2C_SDA
+    domain: digital
+    expected_voltage:
+      min: 2.4
+      max: 3.4
+      unit: V
+    risk_level: low
+    notes: I2C data bus with pull-up to 3V3.
+  - name: VDD_1V8
+    aliases: [1V8]
+    domain: power
+    expected_voltage:
+      min: 1.71
+      max: 1.89
+      unit: V
+    risk_level: low
+    notes: Local LDO output for low-power analog loads.
 
 components:
   - designator: J1
@@ -100,6 +141,92 @@ components:
         net: VOUT_3V3
       - name: "2"
         net: GND
+  - designator: U2
+    type: microcontroller
+    part_number: MCU-like
+    package: QFN32
+    pins:
+      - name: VDD
+        net: VOUT_3V3
+        function: power_input
+      - name: RESET_N
+        net: MCU_RESET_N
+        function: reset
+      - name: CLK_IN
+        net: MCU_CLK
+        function: clock_input
+      - name: I2C_SCL
+        net: I2C_SCL
+        function: i2c_clock
+      - name: I2C_SDA
+        net: I2C_SDA
+        function: i2c_data
+      - name: GND
+        net: GND
+        function: ground
+  - designator: X1
+    type: crystal
+    value: 16MHz
+    pins:
+      - name: "1"
+        net: MCU_CLK
+        function: clock_output
+      - name: "2"
+        net: GND
+        function: ground_reference
+  - designator: U3
+    type: sensor
+    part_number: I2C-sensor-like
+    package: LGA
+    pins:
+      - name: VDD
+        net: VOUT_3V3
+        function: power_input
+      - name: SCL
+        net: I2C_SCL
+        function: i2c_clock
+      - name: SDA
+        net: I2C_SDA
+        function: i2c_data
+      - name: GND
+        net: GND
+        function: ground
+  - designator: U4
+    type: ldo_regulator
+    part_number: LDO-1V8-like
+    package: SOT23-5
+    pins:
+      - name: IN
+        net: VOUT_3V3
+        function: power_input
+      - name: OUT
+        net: VDD_1V8
+        function: power_output
+      - name: EN
+        net: VOUT_3V3
+        function: enable
+      - name: GND
+        net: GND
+        function: ground
+  - designator: C4
+    type: capacitor
+    value: 4.7uF
+    pins:
+      - name: "1"
+        net: VDD_1V8
+      - name: "2"
+        net: GND
+  - designator: U5
+    type: analog_frontend
+    part_number: AFE-like
+    package: QFN16
+    pins:
+      - name: AVDD
+        net: VDD_1V8
+        function: power_input
+      - name: GND
+        net: GND
+        function: ground
 
 test_points:
   - id: TP1
@@ -125,6 +252,31 @@ test_points:
     label: 3V3 power good
     allowed_measurements: [dc_voltage, logic, waveform]
     risk_level: low
+  - id: TP5
+    net: MCU_RESET_N
+    label: MCU reset
+    allowed_measurements: [dc_voltage, logic]
+    risk_level: low
+  - id: TP6
+    net: MCU_CLK
+    label: MCU clock
+    allowed_measurements: [logic, waveform]
+    risk_level: low
+  - id: TP7
+    net: I2C_SCL
+    label: I2C clock
+    allowed_measurements: [dc_voltage, logic]
+    risk_level: low
+  - id: TP8
+    net: I2C_SDA
+    label: I2C data
+    allowed_measurements: [dc_voltage, logic]
+    risk_level: low
+  - id: TP9
+    net: VDD_1V8
+    label: 1V8 LDO output
+    allowed_measurements: [dc_voltage, waveform, impedance]
+    risk_level: low
 
 rails:
   - name: USB_5V
@@ -149,6 +301,16 @@ rails:
     startup_order: 1
     enable_net: EN_3V3
     power_good_net: PG_3V3
+  - name: 1V8_LDO
+    source_net: VOUT_3V3
+    output_net: VDD_1V8
+    nominal_voltage: 1.8
+    voltage_unit: V
+    current_limit:
+      min: 0.001
+      max: 0.05
+      unit: A
+    startup_order: 2
 
 constraints:
   - id: limit_usb_current

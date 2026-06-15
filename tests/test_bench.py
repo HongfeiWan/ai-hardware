@@ -331,6 +331,65 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertEqual(result["next_actions"][0]["net"], "SW_NODE")
             self.assertTrue(result["next_actions"][0]["requires_confirmation"])
 
+    def test_rule_model_detects_reset_stuck_low(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="MCU_RESET_N reset stuck low and not released")
+            logic = app.call_tool("capture_logic", {"net": "MCU_RESET_N", "sample_count": 32})
+            self.assertEqual(logic["measurement"]["target"]["test_point"], "TP5")
+            self.assertTrue(logic["measurement"]["features"]["stuck_low"])
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "fault")
+            self.assertIn("MCU_RESET_N", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
+            self.assertEqual(result["next_actions"][0]["net"], "MCU_RESET_N")
+
+    def test_rule_model_detects_missing_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="MCU_CLK clock missing and crystal not oscillating")
+            logic = app.call_tool("capture_logic", {"net": "MCU_CLK", "sample_count": 32})
+            self.assertEqual(logic["measurement"]["target"]["test_point"], "TP6")
+            self.assertTrue(logic["measurement"]["features"]["stuck_low"])
+            self.assertEqual(logic["measurement"]["features"]["transition_count"], 0)
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "fault")
+            self.assertIn("MCU_CLK", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
+            self.assertEqual(result["next_actions"][0]["net"], "MCU_CLK")
+
+    def test_rule_model_detects_i2c_bus_held_low(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="I2C bus held low on I2C_SCL by an attached device")
+            logic = app.call_tool("capture_logic", {"net": "I2C_SCL", "sample_count": 32})
+            self.assertEqual(logic["measurement"]["target"]["test_point"], "TP7")
+            self.assertTrue(logic["measurement"]["features"]["stuck_low"])
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "fault")
+            self.assertIn("I2C_SCL", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
+            self.assertEqual(result["next_actions"][0]["net"], "I2C_SCL")
+
+    def test_rule_model_detects_ldo_output_abnormal_with_input_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(
+                str(BOARD),
+                observed_symptom="LDO input is normal but 1V8 LDO output abnormal and 1V8 low",
+            )
+            input_voltage = app.call_tool("measure_dc_voltage", {"net": "VOUT_3V3"})
+            output_voltage = app.call_tool("measure_dc_voltage", {"net": "VDD_1V8"})
+            self.assertTrue(input_voltage["measurement"]["features"]["within_expected"])
+            self.assertTrue(output_voltage["measurement"]["features"]["below_expected"])
+            self.assertEqual(output_voltage["measurement"]["target"]["test_point"], "TP9")
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "fault")
+            self.assertIn("VDD_1V8", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
+            self.assertEqual(result["next_actions"][0]["net"], "VDD_1V8")
+            self.assertEqual(result["next_actions"][0]["component"], "U4")
+
     def test_json_http_model_output_is_validated_and_saved(self) -> None:
         payload = {
             "finding": {
@@ -420,8 +479,8 @@ class BenchPrototypeTest(unittest.TestCase):
             suite = ROOT / "examples" / "regressions" / "usb_power_stage.json"
             result = run_regression_suite(suite, Path(tmp) / "regression")
             self.assertTrue(result["ok"], result)
-            self.assertEqual(result["count"], 7)
-            self.assertEqual(result["passed"], 7)
+            self.assertEqual(result["count"], 11)
+            self.assertEqual(result["passed"], 11)
 
     def test_html_report_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

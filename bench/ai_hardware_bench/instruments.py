@@ -301,6 +301,11 @@ class MockDmm:
                 "3V3",
             }:
                 return round(minimum * 0.35, 6)
+            if (
+                any(token in symptom_l for token in ("ldo output", "ldo abnormal", "1v8 low", "1.8v low"))
+                and net_u in {"VDD_1V8", "1V8", "LDO_OUT"}
+            ):
+                return round(minimum * 0.22, 6)
             if any(token in symptom_l for token in ("power good low", "pg low", "pgood low")) and net_u.startswith("PG"):
                 return 0.0
             return round(nominal, 6)
@@ -359,6 +364,42 @@ class MockLogicAnalyzer:
         ) or (
             any(token in symptom_l for token in ("enable low", "en low", "not enabled", "disabled"))
             and (net_u.startswith("EN") or "_EN" in net_u)
+        ) or (
+            any(token in symptom_l for token in ("reset stuck", "reset low", "not released", "held in reset"))
+            and ("RESET" in net_u or "RST" in net_u or "NRST" in net_u)
+        ) or (
+            any(
+                token in symptom_l
+                for token in (
+                    "clock missing",
+                    "clock not",
+                    "no clock",
+                    "not oscillating",
+                    "no oscillation",
+                    "crystal",
+                    "oscillator",
+                )
+            )
+            and ("CLK" in net_u or "CLOCK" in net_u or "XTAL" in net_u or "OSC" in net_u)
+        ) or (
+            any(
+                token in symptom_l
+                for token in (
+                    "bus held low",
+                    "bus stuck low",
+                    "held low",
+                    "stuck low",
+                    "i2c",
+                    "spi",
+                    "scl low",
+                    "sda low",
+                )
+            )
+            and (
+                net_u.startswith(("I2C_", "SPI_"))
+                or net_u.endswith(("_SCL", "_SDA", "_SCK", "_MOSI", "_MISO", "_CS"))
+                or net_u in {"SCL", "SDA", "SCK", "MOSI", "MISO", "CS"}
+            )
         )
         samples: list[tuple[float, int]] = []
         for index in range(sample_count):

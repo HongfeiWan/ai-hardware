@@ -127,6 +127,109 @@
         "next_action_net": "SW_NODE",
         "next_action_type": "inspect_component"
       }
+    },
+    {
+      "id": "usb_power_stage_reset_stuck_low",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail is present but MCU_RESET_N reset stuck low and not released.",
+      "tool_calls": [
+        {
+          "name": "measure_dc_voltage",
+          "arguments": {
+            "net": "VOUT_3V3"
+          }
+        },
+        {
+          "name": "capture_logic",
+          "arguments": {
+            "net": "MCU_RESET_N",
+            "sample_count": 64
+          }
+        }
+      ],
+      "expected": {
+        "severity": "fault",
+        "summary_contains": "MCU_RESET_N",
+        "next_action_net": "MCU_RESET_N",
+        "next_action_type": "inspect_component"
+      }
+    },
+    {
+      "id": "usb_power_stage_clock_missing",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail is present but MCU_CLK clock missing and crystal not oscillating.",
+      "tool_calls": [
+        {
+          "name": "measure_dc_voltage",
+          "arguments": {
+            "net": "VOUT_3V3"
+          }
+        },
+        {
+          "name": "capture_logic",
+          "arguments": {
+            "net": "MCU_CLK",
+            "sample_count": 64
+          }
+        }
+      ],
+      "expected": {
+        "severity": "fault",
+        "summary_contains": "MCU_CLK",
+        "next_action_net": "MCU_CLK",
+        "next_action_type": "inspect_component"
+      }
+    },
+    {
+      "id": "usb_power_stage_i2c_bus_held_low",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail is present but I2C bus held low on I2C_SCL by an attached device.",
+      "tool_calls": [
+        {
+          "name": "measure_dc_voltage",
+          "arguments": {
+            "net": "VOUT_3V3"
+          }
+        },
+        {
+          "name": "capture_logic",
+          "arguments": {
+            "net": "I2C_SCL",
+            "sample_count": 64
+          }
+        }
+      ],
+      "expected": {
+        "severity": "fault",
+        "summary_contains": "I2C_SCL",
+        "next_action_net": "I2C_SCL",
+        "next_action_type": "inspect_component"
+      }
+    },
+    {
+      "id": "usb_power_stage_ldo_output_abnormal",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail is present and LDO input is normal but 1V8 LDO output abnormal and 1V8 low.",
+      "tool_calls": [
+        {
+          "name": "measure_dc_voltage",
+          "arguments": {
+            "net": "VOUT_3V3"
+          }
+        },
+        {
+          "name": "measure_dc_voltage",
+          "arguments": {
+            "net": "VDD_1V8"
+          }
+        }
+      ],
+      "expected": {
+        "severity": "fault",
+        "summary_contains": "VDD_1V8",
+        "next_action_net": "VDD_1V8",
+        "next_action_type": "inspect_component"
+      }
     }
   ]
 }
