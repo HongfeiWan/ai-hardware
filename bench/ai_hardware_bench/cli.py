@@ -58,8 +58,32 @@ def main(argv: list[str] | None = None) -> int:
     call.add_argument("--instrument-config", help="Optional JSON config for real instrument drivers")
     call.add_argument("--model-config", help="Optional JSON config for model adapter")
 
-    importer = sub.add_parser("import-board", help="Convert CSV, BOM CSV/TSV or KiCad XML netlists to board_context JSON")
-    importer.add_argument("--format", choices=["csv", "bom", "bom-csv", "bom-tsv", "kicad", "kicad-xml"], required=True)
+    importer = sub.add_parser(
+        "import-board",
+        help="Convert CSV, Altium CSV/TSV, BOM CSV/TSV, pick-and-place CSV/TSV or KiCad netlists to board_context JSON",
+    )
+    importer.add_argument(
+        "--format",
+        choices=[
+            "csv",
+            "altium",
+            "altium-csv",
+            "altium-tsv",
+            "bom",
+            "bom-csv",
+            "bom-tsv",
+            "pnp",
+            "pick-place",
+            "pick-and-place",
+            "pickplace",
+            "kicad",
+            "kicad-xml",
+            "kicad-sexpr",
+            "kicad-pcb",
+            "kicad-sch",
+        ],
+        required=True,
+    )
     importer.add_argument("--input", required=True)
     importer.add_argument("--output", required=True)
     importer.add_argument("--board-id", required=True)

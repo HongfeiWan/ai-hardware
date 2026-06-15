@@ -201,14 +201,38 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _import_board(self, payload: dict[str, Any]) -> dict[str, Any]:
         source_format = str(payload.get("format") or "csv")
-        if source_format not in {"csv", "kicad", "kicad-xml"}:
+        supported_formats = {
+            "csv",
+            "altium",
+            "altium-csv",
+            "altium-tsv",
+            "bom",
+            "bom-csv",
+            "bom-tsv",
+            "pnp",
+            "pick-place",
+            "pick-and-place",
+            "pickplace",
+            "kicad",
+            "kicad-xml",
+            "kicad-sexpr",
+            "kicad-pcb",
+            "kicad-sch",
+        }
+        if source_format not in supported_formats:
             return {"ok": False, "error": f"Unsupported import format: {source_format}"}
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             return {"ok": False, "error": "Import content is required"}
         board_id = _safe_identifier(str(payload.get("board_id") or "imported_board"))
         board_name = str(payload.get("name") or board_id.replace("_", " ").title())
-        suffix = ".csv" if source_format == "csv" else ".xml"
+        suffix = ".csv"
+        if source_format == "kicad-xml":
+            suffix = ".xml"
+        elif source_format in {"kicad-sexpr", "kicad-pcb"}:
+            suffix = ".kicad_pcb"
+        elif source_format == "kicad-sch":
+            suffix = ".kicad_sch"
         import_dir = self.console_state.artifact_dir / "imports" / board_id
         source_path = import_dir / f"source{suffix}"
         output_path = import_dir / "board_context.json"
@@ -453,8 +477,11 @@ def render_console_html(state: ConsoleState) -> str:
         <label>Format
           <select id="import-format">
             <option value="csv">CSV</option>
+            <option value="altium">Altium CSV/TSV</option>
             <option value="bom">BOM CSV/TSV</option>
+            <option value="pnp">Pick-and-place CSV/TSV</option>
             <option value="kicad">KiCad XML</option>
+            <option value="kicad-pcb">KiCad PCB/SCH</option>
           </select>
         </label>
         <label>Board ID

@@ -582,15 +582,33 @@ class BenchPrototypeTest(unittest.TestCase):
                 self.assertTrue(imported["ok"], imported)
                 self.assertEqual(imported["import"]["board_id"], "console_csv_demo")
 
+                bom_import_request = urllib.request.Request(
+                    f"{base}/api/import-board",
+                    data=json.dumps(
+                        {
+                            "format": "bom",
+                            "board_id": "console_bom_demo",
+                            "name": "Console BOM Demo",
+                            "content": "references,value,mpn,footprint\nU1,MCU,MCU-123,QFN32\n",
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(bom_import_request, timeout=5) as response:
+                    imported_bom = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(imported_bom["ok"], imported_bom)
+                self.assertEqual(imported_bom["import"]["board_id"], "console_bom_demo")
+
                 with urllib.request.urlopen(f"{base}/api/status", timeout=5) as response:
                     imported_status = json.loads(response.read().decode("utf-8"))
-                self.assertEqual(imported_status["board"]["id"], "console_csv_demo")
-                self.assertEqual(imported_status["last_import"]["board_id"], "console_csv_demo")
+                self.assertEqual(imported_status["board"]["id"], "console_bom_demo")
+                self.assertEqual(imported_status["last_import"]["board_id"], "console_bom_demo")
 
                 with urllib.request.urlopen(f"{base}/api/board", timeout=5) as response:
                     imported_board = json.loads(response.read().decode("utf-8"))
-                self.assertEqual(imported_board["board"]["id"], "console_csv_demo")
-                self.assertEqual(imported_board["nets"][0]["name"], "GND")
+                self.assertEqual(imported_board["board"]["id"], "console_bom_demo")
+                self.assertEqual(imported_board["nets"][0]["name"], "UNASSIGNED")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -632,6 +650,48 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertEqual(board.components["R2"]["package"], "0603")
             self.assertEqual(board.components["U1"]["type"], "microcontroller")
 
+    def test_import_altium_csv_to_board_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "altium.csv"
+            output = Path(tmp) / "board.json"
+            source.write_text(
+                "Net Name,Component Designator,Pin Designator,Comment,Footprint,Test Point\n"
+                "VBUS,J1,1,USB-C,CONN,\n"
+                "VBUS,TP1,1,TestPoint,TP,TP1\n"
+                "GND,J1,2,USB-C,CONN,\n"
+                "VOUT_3V3,U1,5,Regulator,SOT-23,\n",
+                encoding="utf-8",
+            )
+            result = import_board(source, "altium", "altium_demo", "Altium Demo", output)
+            self.assertTrue(result["ok"])
+            board = load_board_context(output)
+            self.assertEqual(board.board_id, "altium_demo")
+            self.assertIn("VBUS", board.nets)
+            self.assertEqual(board.nets["VBUS"]["domain"], "power")
+            self.assertEqual(board.components["U1"]["package"], "SOT-23")
+            self.assertEqual(board.components["J1"]["pins"][0]["net"], "VBUS")
+            self.assertEqual(board.test_points["TP1"]["net"], "VBUS")
+
+    def test_import_pick_place_csv_to_board_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "pick_place.csv"
+            output = Path(tmp) / "board.json"
+            source.write_text(
+                "Designator,Comment,Footprint,Center-X(mm),Center-Y(mm),Rotation,Layer\n"
+                "U1,Regulator,SOT-23,12.5,8.25,90,Top\n"
+                "C1,10uF,0603,4.0,3.5,180,Bottom\n",
+                encoding="utf-8",
+            )
+            result = import_board(source, "pnp", "pnp_demo", "PnP Demo", output)
+            self.assertTrue(result["ok"])
+            board = load_board_context(output)
+            self.assertEqual(board.board_id, "pnp_demo")
+            self.assertIn("UNASSIGNED", board.nets)
+            self.assertEqual(board.components["U1"]["package"], "SOT-23")
+            self.assertEqual(board.components["U1"]["placement"]["x"], 12.5)
+            self.assertEqual(board.components["U1"]["placement"]["rotation_deg"], 90.0)
+            self.assertEqual(board.components["C1"]["placement"]["side"], "Bottom")
+
     def test_import_kicad_xml_to_board_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "netlist.xml"
@@ -657,6 +717,43 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertEqual(board.board_id, "kicad_demo")
             self.assertIn("VIN", board.nets)
             self.assertEqual(board.test_points["TP1"]["net"], "VIN")
+
+    def test_import_kicad_pcb_to_board_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "board.kicad_pcb"
+            output = Path(tmp) / "board.json"
+            source.write_text(
+                """
+(kicad_pcb
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VOUT_3V3")
+  (footprint "Package_TO_SOT_SMD:SOT-23"
+    (layer "F.Cu")
+    (at 10.5 20.25 90)
+    (property "Reference" "U1")
+    (property "Value" "Regulator")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "VOUT_3V3"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "TestPoint:TestPoint_Pad"
+    (layer "F.Cu")
+    (property "Reference" "TP1")
+    (property "Value" "TestPoint")
+    (pad "1" thru_hole circle (at 0 0) (size 1 1) (layers "*.Cu") (net 2 "VOUT_3V3"))
+  )
+)
+""",
+                encoding="utf-8",
+            )
+            result = import_board(source, "kicad-pcb", "kicad_pcb_demo", "KiCad PCB Demo", output)
+            self.assertTrue(result["ok"])
+            board = load_board_context(output)
+            self.assertEqual(board.board_id, "kicad_pcb_demo")
+            self.assertIn("VOUT_3V3", board.nets)
+            self.assertEqual(board.components["U1"]["pins"][0]["net"], "VOUT_3V3")
+            self.assertEqual(board.components["U1"]["placement"]["rotation_deg"], 90.0)
+            self.assertEqual(board.test_points["TP1"]["net"], "VOUT_3V3")
 
 class JsonModelHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:

@@ -126,7 +126,7 @@ python3 tools/deploy.py load-net-map --wait-ready 30 --clear-existing \
 
 ## Python Bench 原型
 
-Python 测试站原型在 [bench/ai_hardware_bench](bench/ai_hardware_bench)。这一层不依赖 ESP32 实机，也不强制安装 `mcp`、`fastmcp`、`yaml` 或 `jsonschema`；当前实现用标准库完成板级文件加载、轻量校验、拓扑查询、mock PSU、mock scope、mock fixture、波形特征提取、规则诊断、CSV/BOM/KiCad XML 导入和 MCP-shaped stdio JSON-RPC 入口。
+Python 测试站原型在 [bench/ai_hardware_bench](bench/ai_hardware_bench)。这一层不依赖 ESP32 实机，也不强制安装 `mcp`、`fastmcp`、`yaml` 或 `jsonschema`；当前实现用标准库完成板级文件加载、轻量校验、拓扑查询、mock PSU、mock scope、mock fixture、波形特征提取、规则诊断、CSV/Altium CSV/BOM/PnP/KiCad XML/KiCad PCB 导入和 MCP-shaped stdio JSON-RPC 入口。
 
 常用命令：
 
@@ -240,14 +240,35 @@ python3 tools/bench.py import-board \
   --name "Imported KiCad Board"
 
 python3 tools/bench.py import-board \
+  --format kicad-pcb \
+  --input path/to/board.kicad_pcb \
+  --output artifacts/imported-kicad-pcb-board.json \
+  --board-id imported_kicad_pcb \
+  --name "Imported KiCad PCB Board"
+
+python3 tools/bench.py import-board \
+  --format altium \
+  --input path/to/altium-netlist.csv \
+  --output artifacts/imported-altium-board.json \
+  --board-id imported_altium \
+  --name "Imported Altium Board"
+
+python3 tools/bench.py import-board \
   --format bom \
   --input path/to/bom.csv \
   --output artifacts/imported-bom-board.json \
   --board-id imported_bom \
   --name "Imported BOM Board"
+
+python3 tools/bench.py import-board \
+  --format pnp \
+  --input path/to/pick-place.csv \
+  --output artifacts/imported-pnp-board.json \
+  --board-id imported_pnp \
+  --name "Imported Pick Place Board"
 ```
 
-同样的 CSV/BOM/KiCad XML 内容也可以在本地 `console` 的 Import Board 面板里导入；导入成功后控制台会把当前 board 切换到生成的 `board_context.json`。
+同样的 CSV/Altium CSV/BOM/PnP/KiCad XML/KiCad PCB 内容也可以在本地 `console` 的 Import Board 面板里导入；导入成功后控制台会把当前 board 切换到生成的 `board_context.json`。
 
 默认 driver 是 mock；要试接真实 SCPI 仪器，可以传一个 JSON 配置。没有安装 PyVISA 或 VISA backend 时，只有显式启用 SCPI 才会报错，mock 流程不受影响。mock DMM 会合成 DC 电压和断电阻抗，mock logic analyzer 会保存数字电平 CSV，mock scope 会保存 CSV 波形和 SVG 截图 artifact；SCPI DMM 默认使用 `MEASure:VOLTage:DC?` 和 `MEASure:RESistance?` 查询，SCPI scope 路径会用 `WAVeform:DATA?` 采集 CSV，并预留 `DISPlay:DATA? PNG` 硬拷贝截图命令。
 
