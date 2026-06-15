@@ -170,6 +170,8 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertEqual(status["instruments"][1]["backend"], "mock")
         self.assertEqual(status["instruments"][2]["kind"], "dmm")
         self.assertEqual(status["instruments"][2]["backend"], "mock")
+        self.assertEqual(status["instruments"][3]["kind"], "logic_analyzer")
+        self.assertEqual(status["instruments"][3]["backend"], "mock")
 
     def test_plan_initial_measurements_writes_low_risk_actions(self) -> None:
         app = BenchApp()
@@ -225,6 +227,20 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertEqual(audit["events"][-1]["outcome"], "error")
         self.assertTrue(audit["events"][-1]["safety"]["requires_confirmation"])
 
+    def test_logic_capture_writes_artifact_and_valid_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="PG_3V3 power good low remains deasserted")
+            result = app.call_tool("capture_logic", {"net": "PG_3V3", "sample_count": 32})
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["measurement"]["kind"], "logic")
+            self.assertEqual(result["measurement"]["target"]["test_point"], "TP4")
+            self.assertTrue(result["measurement"]["features"]["stuck_low"])
+            self.assertEqual(result["artifact"]["kind"], "logic_csv")
+            self.assertTrue(Path(result["artifact"]["uri"]).exists())
+            validation = app.validate_session_tool()
+            self.assertTrue(validation["ok"], validation["errors"])
+
     def test_topology_tools_find_power_path_and_test_points(self) -> None:
         app = BenchApp()
         app.load_board_context_tool(str(BOARD))
@@ -278,6 +294,18 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertIn("EN_3V3", result["finding"]["summary"])
             self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
             self.assertEqual(result["next_actions"][0]["net"], "EN_3V3")
+
+    def test_rule_model_detects_power_good_low(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="3V3 rail is present but PG_3V3 power good low")
+            app.call_tool("measure_dc_voltage", {"net": "VOUT_3V3"})
+            app.call_tool("capture_logic", {"net": "PG_3V3", "sample_count": 32})
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "fault")
+            self.assertIn("PG_3V3", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
+            self.assertEqual(result["next_actions"][0]["net"], "PG_3V3")
 
     def test_json_http_model_output_is_validated_and_saved(self) -> None:
         payload = {
@@ -368,8 +396,8 @@ class BenchPrototypeTest(unittest.TestCase):
             suite = ROOT / "examples" / "regressions" / "usb_power_stage.json"
             result = run_regression_suite(suite, Path(tmp) / "regression")
             self.assertTrue(result["ok"], result)
-            self.assertEqual(result["count"], 4)
-            self.assertEqual(result["passed"], 4)
+            self.assertEqual(result["count"], 5)
+            self.assertEqual(result["passed"], 5)
 
     def test_html_report_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

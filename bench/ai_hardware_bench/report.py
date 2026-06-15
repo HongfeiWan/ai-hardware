@@ -239,6 +239,14 @@ def _artifact_preview(artifact: dict[str, Any], base_dir: Path | None) -> str:
         if not samples:
             return "<span class=\"muted\">empty</span>"
         return _waveform_svg(samples)
+    if artifact.get("kind") == "logic_csv":
+        try:
+            samples = _read_logic_csv(path)
+        except Exception:
+            return "<span class=\"muted\">unreadable</span>"
+        if not samples:
+            return "<span class=\"muted\">empty</span>"
+        return _logic_svg(samples)
     if artifact.get("kind") == "scope_screenshot":
         return _image_preview(path, str(artifact.get("mime_type", "application/octet-stream")))
     return ""
@@ -271,6 +279,20 @@ def _read_waveform_csv(path: Path) -> list[tuple[float, float]]:
     return samples
 
 
+def _read_logic_csv(path: Path) -> list[tuple[float, int]]:
+    samples: list[tuple[float, int]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        header = handle.readline().strip().split(",")
+        if header[:2] != ["t_s", "level"]:
+            return []
+        for line in handle:
+            if not line.strip():
+                continue
+            t_s, level = line.strip().split(",", 1)
+            samples.append((float(t_s), int(level)))
+    return samples
+
+
 def _waveform_svg(samples: list[tuple[float, float]]) -> str:
     width = 220
     height = 64
@@ -296,6 +318,31 @@ def _waveform_svg(samples: list[tuple[float, float]]) -> str:
         f"<rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" rx=\"6\" fill=\"#f8fafc\" stroke=\"#d7dde5\"/>"
         f"<polyline points=\"{' '.join(points)}\" fill=\"none\" stroke=\"#0f766e\" stroke-width=\"2\"/>"
         f"<text x=\"6\" y=\"58\" font-size=\"10\" fill=\"#5d6875\">{v_min:.3g}..{v_max:.3g} V</text>"
+        "</svg>"
+    )
+
+
+def _logic_svg(samples: list[tuple[float, int]]) -> str:
+    width = 220
+    height = 64
+    padding = 6
+    stride = max(1, len(samples) // 160)
+    reduced = samples[::stride]
+    t_values = [point[0] for point in reduced]
+    t_min, t_max = min(t_values), max(t_values)
+    if t_max == t_min:
+        t_max = t_min + 1.0
+    points = []
+    for t_s, level in reduced:
+        x = padding + (t_s - t_min) / (t_max - t_min) * (width - padding * 2)
+        y = 18 if level else 46
+        points.append(f"{x:.1f},{y:.1f}")
+    return (
+        f"<svg viewBox=\"0 0 {width} {height}\" width=\"{width}\" height=\"{height}\" "
+        "role=\"img\" aria-label=\"Logic preview\">"
+        f"<rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" rx=\"6\" fill=\"#f8fafc\" stroke=\"#d7dde5\"/>"
+        f"<polyline points=\"{' '.join(points)}\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"2\"/>"
+        "<text x=\"6\" y=\"58\" font-size=\"10\" fill=\"#5d6875\">logic level</text>"
         "</svg>"
     )
 

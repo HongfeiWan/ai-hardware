@@ -49,6 +49,7 @@ class RuleBasedModelAdapter:
         over_voltage_rails: list[str] = []
         ripple_rails: list[str] = []
         low_enable_nets: list[str] = []
+        low_power_good_nets: list[str] = []
         current_limited = False
         for measurement in session.data["measurements"]:
             target_net = measurement.get("target", {}).get("net")
@@ -89,6 +90,16 @@ class RuleBasedModelAdapter:
                             evidence.append(
                                 f"{target_net} measures {voltage} V, below the enable threshold {expected['min']} V."
                             )
+            if measurement.get("kind") == "logic" and target_net in board.nets:
+                high_fraction = features.get("high_fraction")
+                stuck_low = bool(features.get("stuck_low", False))
+                if stuck_low or (isinstance(high_fraction, (int, float)) and high_fraction < 0.5):
+                    for rail in board.rails.values():
+                        if rail.get("power_good_net") == target_net:
+                            low_power_good_nets.append(target_net)
+                            evidence.append(
+                                f"{target_net} logic capture remains low with high_fraction={high_fraction}."
+                            )
         if over_voltage_rails:
             summary = f"{over_voltage_rails[0]} is above its expected voltage range; stop power before further probing."
             confidence = 0.82
@@ -118,6 +129,24 @@ class RuleBasedModelAdapter:
             }
             if affected_rail:
                 evidence.append(f"{action_net} controls rail {affected_rail['name']}.")
+        elif low_power_good_nets:
+            action_net = low_power_good_nets[0]
+            affected_rails = [rail for rail in board.rails.values() if rail.get("power_good_net") == action_net]
+            affected_rail = affected_rails[0] if affected_rails else None
+            summary = f"{action_net} remains deasserted; the rail may be unhealthy or the power-good path is faulty."
+            confidence = 0.66
+            severity = "fault"
+            component = _first_component_on_net(board, action_net)
+            action = {
+                "type": "inspect_component",
+                "net": action_net,
+                "component": component.get("designator") if component else None,
+                "reason": "Check the regulator power-good pin, pull-up path and any downstream fault gating.",
+                "risk_level": board.nets[action_net].get("risk_level", "low"),
+                "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
+            }
+            if affected_rail:
+                evidence.append(f"{action_net} reports power-good for rail {affected_rail['name']}.")
         elif low_voltage_rails and current_limited:
             summary = f"{low_voltage_rails[0]} likely collapses because the upstream rail is current-limited."
             confidence = 0.72
@@ -156,6 +185,7 @@ class RuleBasedModelAdapter:
                 | set(over_voltage_rails)
                 | set(ripple_rails)
                 | set(low_enable_nets)
+                | set(low_power_good_nets)
                 | {action_net}
             ),
             "related_components": [item["designator"] for item in topology.components_on_net(action_net)],

@@ -56,6 +56,32 @@
         "next_action_net": "EN_3V3",
         "next_action_type": "inspect_component"
       }
+    },
+    {
+      "id": "usb_power_stage_power_good_low",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 output is present but PG_3V3 power good low remains deasserted.",
+      "tool_calls": [
+        {
+          "name": "measure_dc_voltage",
+          "arguments": {
+            "net": "VOUT_3V3"
+          }
+        },
+        {
+          "name": "capture_logic",
+          "arguments": {
+            "net": "PG_3V3",
+            "sample_count": 64
+          }
+        }
+      ],
+      "expected": {
+        "severity": "fault",
+        "summary_contains": "PG_3V3",
+        "next_action_net": "PG_3V3",
+        "next_action_type": "inspect_component"
+      }
     }
   ]
 }

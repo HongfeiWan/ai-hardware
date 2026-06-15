@@ -48,6 +48,7 @@ class SafetyPolicy:
         "measure_dc_voltage",
         "measure_impedance",
         "capture_waveform",
+        "capture_logic",
         "capture_scope_screenshot",
         "esp32_set_mux",
         "esp32_reset_dut",
@@ -74,7 +75,13 @@ class SafetyPolicy:
             if board and isinstance(rail, str) and rail in board.rails:
                 output_net = board.rails[rail].get("output_net")
                 risk = _max_risk(risk, _net_risk(board, output_net))
-        elif tool_name in {"measure_dc_voltage", "measure_impedance", "capture_waveform", "capture_scope_screenshot"}:
+        elif tool_name in {
+            "measure_dc_voltage",
+            "measure_impedance",
+            "capture_waveform",
+            "capture_logic",
+            "capture_scope_screenshot",
+        }:
             if board:
                 net_name = _argument_net(arguments, board)
                 risk = _max_risk(risk, _net_risk(board, net_name))

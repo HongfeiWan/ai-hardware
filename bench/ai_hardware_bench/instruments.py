@@ -68,6 +68,23 @@ class DmmDriver(Protocol):
         ...
 
 
+class LogicAnalyzerDriver(Protocol):
+    id: str
+
+    def capture_logic(
+        self,
+        net: str,
+        symptom: str,
+        sample_count: int,
+        duration_s: float,
+        artifact_path: Path,
+    ) -> dict[str, Any]:
+        ...
+
+    def status(self) -> dict[str, Any]:
+        ...
+
+
 @dataclass
 class MockPsu:
     id: str = "mock_psu_ch1"
@@ -300,6 +317,57 @@ class MockDmm:
         return 1_000_000.0
 
 
+class MockLogicAnalyzer:
+    id = "mock_logic_analyzer"
+
+    def capture_logic(
+        self,
+        net: str,
+        symptom: str,
+        sample_count: int,
+        duration_s: float,
+        artifact_path: Path,
+    ) -> dict[str, Any]:
+        sample_count = max(8, min(sample_count, 20000))
+        duration_s = max(1e-6, duration_s)
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        samples = self._synthesize(net, symptom, sample_count, duration_s)
+        with artifact_path.open("w", encoding="utf-8") as handle:
+            handle.write("t_s,level\n")
+            for t_s, level in samples:
+                handle.write(f"{t_s:.9f},{level}\n")
+        return {
+            "artifact_path": artifact_path,
+            "sample_count": sample_count,
+            "duration_s": duration_s,
+            "features": extract_logic_features(samples),
+        }
+
+    def status(self) -> dict[str, Any]:
+        return {"id": self.id, "kind": "logic_analyzer", "backend": "mock", "channels": ["D0", "D1", "D2", "D3"]}
+
+    def _synthesize(self, net: str, symptom: str, sample_count: int, duration_s: float) -> list[tuple[float, int]]:
+        symptom_l = symptom.lower()
+        net_u = net.upper()
+        stuck_low = (
+            any(token in symptom_l for token in ("power good low", "pg low", "pgood low")) and net_u.startswith("PG")
+        ) or (
+            any(token in symptom_l for token in ("enable low", "en low", "not enabled", "disabled"))
+            and (net_u.startswith("EN") or "_EN" in net_u)
+        )
+        samples: list[tuple[float, int]] = []
+        for index in range(sample_count):
+            t_s = duration_s * index / max(sample_count - 1, 1)
+            if stuck_low:
+                level = 0
+            elif any(token in symptom_l for token in ("toggling", "clock", "pulsing")):
+                level = 1 if (index // 4) % 2 == 0 else 0
+            else:
+                level = 1
+            samples.append((t_s, level))
+        return samples
+
+
 def extract_waveform_features(samples: list[tuple[float, float]]) -> dict[str, Any]:
     if not samples:
         raise ValueError("Cannot extract features from empty waveform")
@@ -319,6 +387,27 @@ def extract_waveform_features(samples: list[tuple[float, float]]) -> dict[str, A
         "first_V": round(first, 6),
         "last_V": round(last, 6),
         "settles": settles,
+    }
+
+
+def extract_logic_features(samples: list[tuple[float, int]]) -> dict[str, Any]:
+    if not samples:
+        raise ValueError("Cannot extract features from empty logic capture")
+    levels = [int(level) for _, level in samples]
+    high_count = sum(1 for level in levels if level)
+    low_count = len(levels) - high_count
+    transitions = sum(1 for left, right in zip(levels, levels[1:]) if left != right)
+    return {
+        "sample_count": len(samples),
+        "high_count": high_count,
+        "low_count": low_count,
+        "high_fraction": round(high_count / len(levels), 6),
+        "low_fraction": round(low_count / len(levels), 6),
+        "transition_count": transitions,
+        "first_level": levels[0],
+        "last_level": levels[-1],
+        "stuck_high": high_count == len(levels),
+        "stuck_low": low_count == len(levels),
     }
 
 
@@ -568,6 +657,14 @@ def build_dmm_driver(config: dict[str, Any] | None) -> DmmDriver:
             timeout_ms=int(config.get("timeout_ms", 5000)),
         )
     raise ValueError(f"Unsupported DMM backend: {config.get('backend')}")
+
+
+def build_logic_analyzer_driver(config: dict[str, Any] | None) -> LogicAnalyzerDriver:
+    if not config or config.get("backend", "mock") == "mock":
+        logic = MockLogicAnalyzer()
+        logic.id = config.get("id", "mock_logic_analyzer") if config else "mock_logic_analyzer"
+        return logic
+    raise ValueError(f"Unsupported logic analyzer backend: {config.get('backend')}")
 
 
 def _safe_float_query(connection: ScpiConnection, query: str) -> float | None:

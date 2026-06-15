@@ -154,7 +154,7 @@
         "id": { "type": "string" },
         "kind": {
           "type": "string",
-          "enum": ["waveform_csv", "waveform_binary", "scope_screenshot", "log", "image", "report", "other"]
+          "enum": ["waveform_csv", "waveform_binary", "logic_csv", "scope_screenshot", "log", "image", "report", "other"]
         },
         "uri": { "type": "string" },
         "mime_type": { "type": "string" },

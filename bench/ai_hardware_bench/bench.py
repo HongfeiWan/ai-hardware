@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .data import BoardContext, DiagnosticSession, load_board_context, utc_now
-from .instruments import MockFixture, build_dmm_driver, build_psu_driver, build_scope_driver, extract_waveform_features
+from .instruments import (
+    MockFixture,
+    build_dmm_driver,
+    build_logic_analyzer_driver,
+    build_psu_driver,
+    build_scope_driver,
+    extract_waveform_features,
+)
 from .model import build_model_adapter
 from .safety import AuditLogger, SafetyPolicy
 from .session import validate_session, validate_session_file
@@ -40,6 +47,7 @@ class BenchApp:
         self.psu = build_psu_driver(config.get("psu"))
         self.scope = build_scope_driver(config.get("scope"))
         self.dmm = build_dmm_driver(config.get("dmm"))
+        self.logic = build_logic_analyzer_driver(config.get("logic_analyzer"))
         self.fixture = MockFixture()
         self.model = build_model_adapter(model)
         self.tools: dict[str, ToolFunc] = {
@@ -59,6 +67,7 @@ class BenchApp:
             "measure_dc_voltage": self.measure_dc_voltage,
             "measure_impedance": self.measure_impedance,
             "capture_waveform": self.capture_waveform,
+            "capture_logic": self.capture_logic,
             "capture_scope_screenshot": self.capture_scope_screenshot,
             "extract_signal_features": self.extract_signal_features,
             "diagnose_hardware": self.diagnose_hardware,
@@ -118,6 +127,7 @@ class BenchApp:
                 self.psu.status(),
                 self.scope.status(),
                 self.dmm.status(),
+                self.logic.status(),
                 {"id": "mock_fixture", "kind": "esp32_fixture", "backend": "mock"},
             ],
         }
@@ -430,6 +440,52 @@ class BenchApp:
         session.add_measurement(measurement)
         return {"ok": True, "measurement": measurement, "artifact": artifact}
 
+    def capture_logic(
+        self,
+        net: str,
+        test_point: str | None = None,
+        sample_count: int = 256,
+        duration_s: float = 0.05,
+    ) -> dict[str, Any]:
+        board = self.require_board()
+        session = self.require_session()
+        net_name = board.canonical_net(net)
+        point = self._resolve_test_point(net_name, test_point, "logic", required=False)
+        artifact_id = f"artifact_{self._next_measurement_id()}_{net_name.lower()}_logic"
+        artifact_path = self.artifact_dir / session.session_id / f"{artifact_id}.csv"
+        captured = self.logic.capture_logic(
+            net_name,
+            session.data.get("observed_symptom", ""),
+            sample_count,
+            duration_s,
+            artifact_path,
+        )
+        measurement_id = self._next_measurement_id()
+        artifact = {
+            "id": artifact_id,
+            "kind": "logic_csv",
+            "uri": str(artifact_path),
+            "mime_type": "text/csv",
+            "sha256": _sha256_file(artifact_path),
+        }
+        session.add_artifact(artifact)
+        measurement = {
+            "id": measurement_id,
+            "timestamp": utc_now(),
+            "kind": "logic",
+            "target": _measurement_target(net_name, point),
+            "instrument_id": self.logic.id,
+            "settings": {
+                "sample_count": captured["sample_count"],
+                "duration_s": captured["duration_s"],
+            },
+            "result": {"artifact_id": artifact_id},
+            "features": captured["features"],
+            "artifact_ids": [artifact_id],
+        }
+        session.add_measurement(measurement)
+        return {"ok": True, "measurement": measurement, "artifact": artifact}
+
     def extract_signal_features(self, artifact_id: str | None = None, uri: str | None = None) -> dict[str, Any]:
         session = self.require_session()
         artifact: dict[str, Any] | None = None
@@ -627,6 +683,7 @@ class BenchApp:
                 "measure_dc_voltage": "Measure DC voltage on a net with the configured DMM.",
                 "measure_impedance": "Measure power-off impedance on a net with the configured DMM.",
                 "capture_waveform": "Capture a synthetic mock waveform and write a CSV artifact.",
+                "capture_logic": "Capture a digital logic trace and write a CSV artifact.",
                 "capture_scope_screenshot": "Capture a scope screenshot artifact for a net.",
                 "extract_signal_features": "Extract basic voltage features from a waveform CSV.",
                 "diagnose_hardware": "Run rule-based diagnosis over current session measurements.",
@@ -824,6 +881,7 @@ class BenchApp:
             self.psu.status(),
             self.scope.status(),
             self.dmm.status(),
+            self.logic.status(),
             {"id": "mock_fixture", "kind": "esp32_fixture", "backend": "mock"},
         ]
 

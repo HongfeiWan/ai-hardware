@@ -278,6 +278,13 @@ class DiagnosticSession:
                     "model": "MockDMM",
                 },
                 {
+                    "id": "mock_logic_analyzer",
+                    "kind": "logic_analyzer",
+                    "vendor": "ai-hardware",
+                    "model": "MockLogicAnalyzer",
+                    "channels": ["D0", "D1", "D2", "D3"],
+                },
+                {
                     "id": "mock_fixture",
                     "kind": "esp32_fixture",
                     "vendor": "ai-hardware",
