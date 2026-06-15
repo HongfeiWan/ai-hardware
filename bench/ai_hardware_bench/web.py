@@ -226,13 +226,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "Import content is required"}
         board_id = _safe_identifier(str(payload.get("board_id") or "imported_board"))
         board_name = str(payload.get("name") or board_id.replace("_", " ").title())
-        suffix = ".csv"
-        if source_format == "kicad-xml":
-            suffix = ".xml"
-        elif source_format in {"kicad-sexpr", "kicad-pcb"}:
-            suffix = ".kicad_pcb"
-        elif source_format == "kicad-sch":
-            suffix = ".kicad_sch"
+        suffix = _import_source_suffix(source_format, content)
         import_dir = self.console_state.artifact_dir / "imports" / board_id
         source_path = import_dir / f"source{suffix}"
         output_path = import_dir / "board_context.json"
@@ -480,8 +474,10 @@ def render_console_html(state: ConsoleState) -> str:
             <option value="altium">Altium CSV/TSV</option>
             <option value="bom">BOM CSV/TSV</option>
             <option value="pnp">Pick-and-place CSV/TSV</option>
-            <option value="kicad">KiCad XML</option>
-            <option value="kicad-pcb">KiCad PCB/SCH</option>
+            <option value="kicad">KiCad Auto</option>
+            <option value="kicad-xml">KiCad XML</option>
+            <option value="kicad-pcb">KiCad PCB</option>
+            <option value="kicad-sch">KiCad SCH</option>
           </select>
         </label>
         <label>Board ID
@@ -746,6 +742,19 @@ def _safe_identifier(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value.strip())
     cleaned = cleaned.strip("_-")
     return cleaned or "imported_board"
+
+
+def _import_source_suffix(source_format: str, content: str) -> str:
+    stripped = content.lstrip()
+    if source_format == "kicad-xml":
+        return ".xml"
+    if source_format == "kicad-sch" or stripped.startswith("(kicad_sch"):
+        return ".kicad_sch"
+    if source_format in {"kicad-sexpr", "kicad-pcb"} or stripped.startswith("(kicad_pcb"):
+        return ".kicad_pcb"
+    if source_format == "kicad" and stripped.startswith("<"):
+        return ".xml"
+    return ".csv"
 
 
 def _resolve_console_artifact_path(uri: Any, artifact_dir: Path, session_dir: Path) -> Path | None:

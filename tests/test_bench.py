@@ -609,6 +609,34 @@ class BenchPrototypeTest(unittest.TestCase):
                     imported_board = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(imported_board["board"]["id"], "console_bom_demo")
                 self.assertEqual(imported_board["nets"][0]["name"], "UNASSIGNED")
+
+                sch_import_request = urllib.request.Request(
+                    f"{base}/api/import-board",
+                    data=json.dumps(
+                        {
+                            "format": "kicad",
+                            "board_id": "console_sch_demo",
+                            "name": "Console SCH Demo",
+                            "content": """
+(kicad_sch
+  (symbol
+    (property "Reference" "U1")
+    (property "Value" "MCU")
+    (property "Footprint" "Package_QFN:QFN-32")
+    (property "MPN" "MCU-123")
+  )
+)
+""",
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(sch_import_request, timeout=5) as response:
+                    imported_sch = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(imported_sch["ok"], imported_sch)
+                self.assertTrue(imported_sch["source_path"].endswith(".kicad_sch"))
+                self.assertEqual(imported_sch["import"]["counts"]["components"], 1)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -754,6 +782,39 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertEqual(board.components["U1"]["pins"][0]["net"], "VOUT_3V3")
             self.assertEqual(board.components["U1"]["placement"]["rotation_deg"], 90.0)
             self.assertEqual(board.test_points["TP1"]["net"], "VOUT_3V3")
+
+
+    def test_import_kicad_sch_to_board_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "board.kicad_sch"
+            output = Path(tmp) / "board.json"
+            source.write_text(
+                """
+(kicad_sch
+  (symbol
+    (property "Reference" "U1")
+    (property "Value" "Regulator")
+    (property "Footprint" "Package_TO_SOT_SMD:SOT-23")
+    (property "Part Number" "REG-123")
+  )
+  (symbol
+    (property "Reference" "C1")
+    (property "Value" "10uF")
+    (property "Footprint" "Capacitor_SMD:C_0603")
+  )
+)
+""",
+                encoding="utf-8",
+            )
+            result = import_board(source, "kicad-sch", "kicad_sch_demo", "KiCad SCH Demo", output)
+            self.assertTrue(result["ok"])
+            board = load_board_context(output)
+            self.assertEqual(board.board_id, "kicad_sch_demo")
+            self.assertEqual(board.components["U1"]["package"], "Package_TO_SOT_SMD:SOT-23")
+            self.assertEqual(board.components["U1"]["part_number"], "REG-123")
+            self.assertEqual(board.components["C1"]["value"], "10uF")
+            self.assertEqual(board.nets["UNASSIGNED"]["domain"], "unknown")
+
 
 class JsonModelHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
