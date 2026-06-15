@@ -89,7 +89,10 @@ sequenceDiagram
 | `list_nets` | 查询网标、别名、领域、电压范围 | 无副作用 |
 | `trace_net_neighbors` | 查询某网标附近元件和拓扑路径 | 限制最大深度 |
 | `set_power_rail` | 设置电源电压、电流、输出状态 | 电压/电流/通道上限 |
+| `measure_dc_voltage` | 用 DMM 测量目标网标直流电压 | 高风险网标需人工确认 |
+| `measure_impedance` | 用 DMM 测量断电状态下目标网标对地阻抗 | 必须断电，高风险网标需人工确认 |
 | `capture_waveform` | 采集某测试点波形 | 通道映射 allowlist |
+| `capture_scope_screenshot` | 保存示波器屏幕截图 artifact | 高风险网标同样需要确认 |
 | `extract_signal_features` | 从波形提取纹波、频率、占空比等 | 无副作用 |
 | `diagnose_hardware` | 调用模型做结构化诊断 | 输出必须 schema 校验 |
 | `suggest_next_probe` | 给出下一步测量点 | 高风险动作需人工确认 |

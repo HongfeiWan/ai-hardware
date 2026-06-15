@@ -7,7 +7,7 @@
 1. 加载 `board_context`，校验 schema。
 2. 输入故障现象，例如“3V3 不启动”“USB 枚举失败”“某路电源纹波过大”。
 3. 根据网标和拓扑找到相关电源轨、IC 引脚、测试点和上下游器件。
-4. 生成低风险首轮测量计划，例如不上电电阻、限流上电、关键 rail DC 电压；Python Bench 中对应 `plan_initial_measurements`。
+4. 生成低风险首轮测量计划，例如不上电电阻、限流上电、关键 rail DC 电压；Python Bench 中对应 `plan_initial_measurements`、`measure_impedance` 和 `measure_dc_voltage`。
 5. Python 工具执行仪器动作，保存原始数据引用和结构化特征。
 6. 模型读取板级上下文、测量特征和历史记录，输出诊断或下一步测量。
 7. 工具层校验下一步动作是否在安全边界内。

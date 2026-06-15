@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .bench import BenchApp
 from .data import load_board_context, load_document
+from .importers import import_board
 from .regression import run_regression_suite
 from .report import generate_session_report
 
@@ -31,6 +32,7 @@ class ConsoleState:
         self.last_demo: dict[str, Any] | None = None
         self.last_regression: dict[str, Any] | None = None
         self.last_plan: dict[str, Any] | None = None
+        self.last_import: dict[str, Any] | None = None
 
 
 def create_console_server(
@@ -93,6 +95,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.console_state.last_plan = result
             self._send_json(result)
             return
+        if parsed.path == "/api/import-board":
+            payload = self._read_json_body()
+            result = self._import_board(payload)
+            self.console_state.last_import = result
+            self._send_json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -116,6 +124,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             },
             "instruments": app.instrument_status()["instruments"],
             "model": app.model_status()["model"],
+            "last_import": _compact_last(self.console_state.last_import),
             "last_plan": _compact_last(self.console_state.last_plan),
             "last_demo": _compact_last(self.console_state.last_demo),
             "last_regression": _compact_last(self.console_state.last_regression),
@@ -189,6 +198,36 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             "include_power_off": bool(payload.get("include_power_off", True)),
         }
         return app.call_tool("plan_initial_measurements", arguments)
+
+    def _import_board(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source_format = str(payload.get("format") or "csv")
+        if source_format not in {"csv", "kicad", "kicad-xml"}:
+            return {"ok": False, "error": f"Unsupported import format: {source_format}"}
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return {"ok": False, "error": "Import content is required"}
+        board_id = _safe_identifier(str(payload.get("board_id") or "imported_board"))
+        board_name = str(payload.get("name") or board_id.replace("_", " ").title())
+        suffix = ".csv" if source_format == "csv" else ".xml"
+        import_dir = self.console_state.artifact_dir / "imports" / board_id
+        source_path = import_dir / f"source{suffix}"
+        output_path = import_dir / "board_context.json"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(content, encoding="utf-8")
+        try:
+            result = import_board(source_path, source_format, board_id, board_name, output_path)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "source_path": str(source_path)}
+        self.console_state.board_path = str(output_path)
+        self.console_state.last_demo = None
+        self.console_state.last_plan = None
+        return {
+            "ok": True,
+            "format": source_format,
+            "source_path": str(source_path),
+            "board_path": str(output_path),
+            "import": result,
+        }
 
     def _run_demo(self, symptom: str) -> dict[str, Any]:
         demo_dir = self.console_state.artifact_dir / "demo"
@@ -338,15 +377,20 @@ def render_console_html(state: ConsoleState) -> str:
       min-height: 36px;
     }}
     button.secondary, a.secondary {{ background: #fff; color: var(--accent); border-color: var(--line); }}
-    textarea {{
+    input, select, textarea {{
       width: 100%;
-      min-height: 72px;
       border: 1px solid var(--line);
       border-radius: 6px;
       padding: 9px;
       font: inherit;
+      background: #fff;
+    }}
+    textarea {{
+      min-height: 72px;
       resize: vertical;
     }}
+    label {{ display: grid; gap: 5px; color: var(--muted); }}
+    .form-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 10px; }}
     code, pre {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
     pre {{
       white-space: pre-wrap;
@@ -404,6 +448,27 @@ def render_console_html(state: ConsoleState) -> str:
       </section>
     </div>
     <section>
+      <h2>Import Board</h2>
+      <div class="form-grid">
+        <label>Format
+          <select id="import-format">
+            <option value="csv">CSV</option>
+            <option value="kicad">KiCad XML</option>
+          </select>
+        </label>
+        <label>Board ID
+          <input id="import-board-id" value="console_import">
+        </label>
+        <label>Name
+          <input id="import-name" value="Console Import">
+        </label>
+      </div>
+      <textarea id="import-content" spellcheck="false">net_name,test_point,domain,risk_level,expected_voltage_min,expected_voltage_max,allowed_measurements,component,pin,component_type
+VIN,TP1,power,medium,4.75,5.25,"dc_voltage,waveform",J1,1,connector
+GND,TP2,ground,low,,,dc_voltage,J1,2,connector</textarea>
+      <div class="toolbar" style="margin-top: 10px;"><button id="import-board">Import Board</button></div>
+    </section>
+    <section>
       <h2>Board Topology</h2>
       <div id="topology" class="table-wrap"></div>
     </section>
@@ -425,6 +490,10 @@ def render_console_html(state: ConsoleState) -> str:
     const outputEl = document.getElementById('output');
     const linksEl = document.getElementById('links');
     const symptomEl = document.getElementById('symptom');
+    const importFormatEl = document.getElementById('import-format');
+    const importBoardIdEl = document.getElementById('import-board-id');
+    const importNameEl = document.getElementById('import-name');
+    const importContentEl = document.getElementById('import-content');
 
     function show(data) {{
       outputEl.textContent = JSON.stringify(data, null, 2);
@@ -564,6 +633,25 @@ def render_console_html(state: ConsoleState) -> str:
       await refresh();
     }}
 
+    async function importBoard() {{
+      const response = await fetch('/api/import-board', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{
+          format: importFormatEl.value,
+          board_id: importBoardIdEl.value,
+          name: importNameEl.value,
+          content: importContentEl.value
+        }})
+      }});
+      const data = await response.json();
+      setLinks({{}});
+      show(data);
+      if (data.ok) {{
+        await refresh();
+      }}
+    }}
+
     async function runDemo() {{
       const response = await fetch('/api/demo', {{
         method: 'POST',
@@ -593,6 +681,7 @@ def render_console_html(state: ConsoleState) -> str:
     }}
 
     document.getElementById('refresh').addEventListener('click', refresh);
+    document.getElementById('import-board').addEventListener('click', importBoard);
     document.getElementById('plan').addEventListener('click', runPlan);
     document.getElementById('run-demo').addEventListener('click', runDemo);
     document.getElementById('replay').addEventListener('click', replayWaveforms);
@@ -607,6 +696,14 @@ def render_console_html(state: ConsoleState) -> str:
 def _compact_last(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if not payload:
         return None
+    if "import" in payload:
+        imported = payload.get("import") or {}
+        return {
+            "ok": payload.get("ok"),
+            "board_path": payload.get("board_path"),
+            "board_id": imported.get("board_id"),
+            "counts": imported.get("counts"),
+        }
     if "report_url" in payload:
         return {"ok": payload.get("ok"), "report_url": payload.get("report_url")}
     return {
@@ -615,6 +712,12 @@ def _compact_last(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         "failed": payload.get("failed"),
         "count": payload.get("count"),
     }
+
+
+def _safe_identifier(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value.strip())
+    cleaned = cleaned.strip("_-")
+    return cleaned or "imported_board"
 
 
 def _resolve_console_artifact_path(uri: Any, artifact_dir: Path, session_dir: Path) -> Path | None:

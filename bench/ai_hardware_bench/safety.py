@@ -45,6 +45,8 @@ class SafetyPolicy:
 
     SIDE_EFFECT_TOOLS = {
         "set_power_rail",
+        "measure_dc_voltage",
+        "measure_impedance",
         "capture_waveform",
         "capture_scope_screenshot",
         "esp32_set_mux",
@@ -72,7 +74,7 @@ class SafetyPolicy:
             if board and isinstance(rail, str) and rail in board.rails:
                 output_net = board.rails[rail].get("output_net")
                 risk = _max_risk(risk, _net_risk(board, output_net))
-        elif tool_name in {"capture_waveform", "capture_scope_screenshot"}:
+        elif tool_name in {"measure_dc_voltage", "measure_impedance", "capture_waveform", "capture_scope_screenshot"}:
             if board:
                 net_name = _argument_net(arguments, board)
                 risk = _max_risk(risk, _net_risk(board, net_name))
@@ -81,6 +83,9 @@ class SafetyPolicy:
                     risk = _max_risk(risk, board.test_points[point_id].get("risk_level", "low"))
                 if _requires_manual_confirmation(board, net_name):
                     reasons.append(f"{net_name} is covered by a manual_confirmation constraint")
+            if tool_name == "measure_impedance" and arguments.get("power_state", "off") != "off":
+                reasons.append("Impedance measurements must be power-off")
+                risk = _max_risk(risk, "high")
             if risk == "high":
                 reasons.append(f"High-risk {tool_name} requires confirmation")
         elif tool_name in {"esp32_set_mux", "esp32_reset_dut"}:

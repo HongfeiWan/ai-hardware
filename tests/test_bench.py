@@ -168,6 +168,8 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertTrue(status["ok"])
         self.assertEqual(status["instruments"][0]["backend"], "mock")
         self.assertEqual(status["instruments"][1]["backend"], "mock")
+        self.assertEqual(status["instruments"][2]["kind"], "dmm")
+        self.assertEqual(status["instruments"][2]["backend"], "mock")
 
     def test_plan_initial_measurements_writes_low_risk_actions(self) -> None:
         app = BenchApp()
@@ -182,6 +184,46 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertIn("PG_3V3", action_nets)
         self.assertNotIn("SW_NODE", action_nets)
         self.assertTrue(all(action["risk_level"] in {"low", "medium"} for action in result["next_actions"]))
+
+    def test_dmm_measurements_write_valid_session_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="3V3 rail does not stay up")
+            impedance = app.call_tool("measure_impedance", {"net": "VOUT_3V3"})
+            voltage = app.call_tool("measure_dc_voltage", {"net": "VOUT_3V3"})
+            self.assertEqual(impedance["measurement"]["kind"], "impedance")
+            self.assertEqual(impedance["measurement"]["target"]["test_point"], "TP3")
+            self.assertFalse(impedance["measurement"]["features"]["short_to_ground"])
+            self.assertEqual(voltage["measurement"]["kind"], "dc_voltage")
+            self.assertTrue(voltage["measurement"]["features"]["below_expected"])
+            self.assertIn("mock_dmm", {instrument["id"] for instrument in app.session.data["instruments"]})
+            validation = app.validate_session_tool()
+            self.assertTrue(validation["ok"], validation["errors"])
+
+    def test_dmm_plan_actions_are_executable(self) -> None:
+        app = BenchApp()
+        app.load_board_context_tool(str(BOARD))
+        plan = app.call_tool("plan_initial_measurements", {"max_actions": 6})
+        dmm_actions = [
+            action
+            for action in plan["next_actions"]
+            if action.get("instrument_kind") == "dmm" and action.get("test_point")
+        ]
+        self.assertGreaterEqual(len(dmm_actions), 2)
+        for action in dmm_actions[:2]:
+            tool = "measure_impedance" if action.get("measurement_kind") == "impedance" else "measure_dc_voltage"
+            result = app.call_tool(tool, {"net": action["net"], "test_point": action["test_point"]})
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["measurement"]["target"]["net"], action["net"])
+
+    def test_impedance_measurement_requires_power_off(self) -> None:
+        app = BenchApp()
+        app.load_board_context_tool(str(BOARD))
+        with self.assertRaises(PermissionError):
+            app.call_tool("measure_impedance", {"net": "VOUT_3V3", "power_state": "on"})
+        audit = app.read_audit_log()
+        self.assertEqual(audit["events"][-1]["outcome"], "error")
+        self.assertTrue(audit["events"][-1]["safety"]["requires_confirmation"])
 
     def test_topology_tools_find_power_path_and_test_points(self) -> None:
         app = BenchApp()
@@ -392,6 +434,39 @@ class BenchPrototypeTest(unittest.TestCase):
                 self.assertTrue(waveform["ok"])
                 self.assertLessEqual(len(waveform["samples"]), 40)
                 self.assertEqual(waveform["measurement"]["target"]["net"], "VOUT_3V3")
+
+                import_request = urllib.request.Request(
+                    f"{base}/api/import-board",
+                    data=json.dumps(
+                        {
+                            "format": "csv",
+                            "board_id": "console_csv_demo",
+                            "name": "Console CSV Demo",
+                            "content": (
+                                "net_name,test_point,domain,risk_level,expected_voltage_min,expected_voltage_max,"
+                                "allowed_measurements,component,pin,component_type\n"
+                                "VIN,TP1,power,medium,4.75,5.25,\"dc_voltage,waveform\",J1,1,connector\n"
+                                "GND,TP2,ground,low,,,dc_voltage,J1,2,connector\n"
+                            ),
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(import_request, timeout=5) as response:
+                    imported = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(imported["ok"], imported)
+                self.assertEqual(imported["import"]["board_id"], "console_csv_demo")
+
+                with urllib.request.urlopen(f"{base}/api/status", timeout=5) as response:
+                    imported_status = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(imported_status["board"]["id"], "console_csv_demo")
+                self.assertEqual(imported_status["last_import"]["board_id"], "console_csv_demo")
+
+                with urllib.request.urlopen(f"{base}/api/board", timeout=5) as response:
+                    imported_board = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(imported_board["board"]["id"], "console_csv_demo")
+                self.assertEqual(imported_board["nets"][0]["name"], "GND")
             finally:
                 server.shutdown()
                 server.server_close()

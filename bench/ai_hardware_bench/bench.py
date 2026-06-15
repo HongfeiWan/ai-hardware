@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .data import BoardContext, DiagnosticSession, load_board_context, utc_now
-from .instruments import MockFixture, build_psu_driver, build_scope_driver, extract_waveform_features
+from .instruments import MockFixture, build_dmm_driver, build_psu_driver, build_scope_driver, extract_waveform_features
 from .model import build_model_adapter
 from .safety import AuditLogger, SafetyPolicy
 from .session import validate_session, validate_session_file
@@ -39,6 +39,7 @@ class BenchApp:
         model = _load_json_config(model_config, "model config")
         self.psu = build_psu_driver(config.get("psu"))
         self.scope = build_scope_driver(config.get("scope"))
+        self.dmm = build_dmm_driver(config.get("dmm"))
         self.fixture = MockFixture()
         self.model = build_model_adapter(model)
         self.tools: dict[str, ToolFunc] = {
@@ -55,6 +56,8 @@ class BenchApp:
             "trace_power_path": self.trace_power_path,
             "list_downstream_loads": self.list_downstream_loads,
             "set_power_rail": self.set_power_rail,
+            "measure_dc_voltage": self.measure_dc_voltage,
+            "measure_impedance": self.measure_impedance,
             "capture_waveform": self.capture_waveform,
             "capture_scope_screenshot": self.capture_scope_screenshot,
             "extract_signal_features": self.extract_signal_features,
@@ -78,6 +81,7 @@ class BenchApp:
         if self.session is None:
             board = self.require_board()
             self.session = DiagnosticSession(board.board_id, "unspecified symptom")
+            self._sync_session_instruments()
         return self.session
 
     def load_board_context_tool(
@@ -92,6 +96,7 @@ class BenchApp:
         self.topology = Topology(board)
         generated_session_id = session_id or f"session_{board.board_id}_{_timestamp_id()}"
         self.session = DiagnosticSession(board.board_id, observed_symptom, generated_session_id, operator)
+        self._sync_session_instruments()
         return {
             "ok": True,
             "board_id": board.board_id,
@@ -112,6 +117,7 @@ class BenchApp:
             "instruments": [
                 self.psu.status(),
                 self.scope.status(),
+                self.dmm.status(),
                 {"id": "mock_fixture", "kind": "esp32_fixture", "backend": "mock"},
             ],
         }
@@ -320,6 +326,59 @@ class BenchApp:
                 "current_limited": bool(result.get("current_limited", False)),
                 "within_configured_limits": True,
             },
+        }
+        session.add_measurement(measurement)
+        return {"ok": True, "measurement": measurement}
+
+    def measure_dc_voltage(self, net: str, test_point: str | None = None) -> dict[str, Any]:
+        board = self.require_board()
+        session = self.require_session()
+        net_name = board.canonical_net(net)
+        point = self._resolve_test_point(net_name, test_point, "dc_voltage")
+        captured = self.dmm.measure_dc_voltage(
+            net_name,
+            board.nets[net_name].get("expected_voltage"),
+            session.data.get("observed_symptom", ""),
+        )
+        measurement = {
+            "id": self._next_measurement_id(),
+            "timestamp": utc_now(),
+            "kind": "dc_voltage",
+            "target": _measurement_target(net_name, point),
+            "instrument_id": self.dmm.id,
+            "settings": {"mode": "dc_voltage"},
+            "result": captured["result"],
+            "features": captured["features"],
+        }
+        session.add_measurement(measurement)
+        return {"ok": True, "measurement": measurement}
+
+    def measure_impedance(
+        self,
+        net: str,
+        test_point: str | None = None,
+        power_state: str = "off",
+    ) -> dict[str, Any]:
+        if power_state != "off":
+            raise ValueError("Impedance measurements require power_state='off'")
+        board = self.require_board()
+        session = self.require_session()
+        net_name = board.canonical_net(net)
+        point = self._resolve_test_point(net_name, test_point, "impedance")
+        captured = self.dmm.measure_impedance(
+            net_name,
+            board.nets[net_name],
+            session.data.get("observed_symptom", ""),
+        )
+        measurement = {
+            "id": self._next_measurement_id(),
+            "timestamp": utc_now(),
+            "kind": "impedance",
+            "target": _measurement_target(net_name, point),
+            "instrument_id": self.dmm.id,
+            "settings": {"mode": "resistance_2w", "power_state": power_state},
+            "result": captured["result"],
+            "features": captured["features"],
         }
         session.add_measurement(measurement)
         return {"ok": True, "measurement": measurement}
@@ -565,6 +624,8 @@ class BenchApp:
                 "trace_power_path": "Trace upstream rails feeding a target net.",
                 "list_downstream_loads": "List nearby downstream load components for a rail or net.",
                 "set_power_rail": "Safety-check and mock a programmable PSU rail action.",
+                "measure_dc_voltage": "Measure DC voltage on a net with the configured DMM.",
+                "measure_impedance": "Measure power-off impedance on a net with the configured DMM.",
                 "capture_waveform": "Capture a synthetic mock waveform and write a CSV artifact.",
                 "capture_scope_screenshot": "Capture a scope screenshot artifact for a net.",
                 "extract_signal_features": "Extract basic voltage features from a waveform CSV.",
@@ -756,9 +817,26 @@ class BenchApp:
         session = self.require_session()
         return f"m{len(session.data['measurements']) + 1:03d}"
 
+    def _sync_session_instruments(self) -> None:
+        if self.session is None:
+            return
+        self.session.data["instruments"] = [
+            self.psu.status(),
+            self.scope.status(),
+            self.dmm.status(),
+            {"id": "mock_fixture", "kind": "esp32_fixture", "backend": "mock"},
+        ]
+
 
 def _timestamp_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _measurement_target(net: str, point: dict[str, Any] | None) -> dict[str, Any]:
+    target: dict[str, Any] = {"net": net}
+    if point:
+        target["test_point"] = point["id"]
+    return target
 
 
 def _sha256_file(path: Path) -> str:

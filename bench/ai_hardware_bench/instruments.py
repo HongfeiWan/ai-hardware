@@ -45,6 +45,29 @@ class ScopeDriver(Protocol):
         ...
 
 
+class DmmDriver(Protocol):
+    id: str
+
+    def measure_dc_voltage(
+        self,
+        net: str,
+        expected_voltage: dict[str, Any] | None,
+        symptom: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def measure_impedance(
+        self,
+        net: str,
+        net_info: dict[str, Any],
+        symptom: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def status(self) -> dict[str, Any]:
+        ...
+
+
 @dataclass
 class MockPsu:
     id: str = "mock_psu_ch1"
@@ -170,6 +193,107 @@ class MockScope:
                 voltage = nominal + nominal * 0.004 * sin(2 * pi * 5 * phase)
             samples.append((t_s, round(voltage, 6)))
         return samples
+
+
+class MockDmm:
+    id = "mock_dmm"
+
+    def measure_dc_voltage(
+        self,
+        net: str,
+        expected_voltage: dict[str, Any] | None,
+        symptom: str,
+    ) -> dict[str, Any]:
+        voltage = self._synthesize_voltage(net, expected_voltage, symptom)
+        features: dict[str, Any] = {"voltage_V": voltage}
+        if expected_voltage:
+            minimum = float(expected_voltage["min"])
+            maximum = float(expected_voltage["max"])
+            features.update(
+                {
+                    "expected_min_V": minimum,
+                    "expected_max_V": maximum,
+                    "below_expected": voltage < minimum,
+                    "above_expected": voltage > maximum,
+                    "within_expected": minimum <= voltage <= maximum,
+                    "margin_to_min_V": round(voltage - minimum, 6),
+                    "margin_to_max_V": round(maximum - voltage, 6),
+                }
+            )
+        return {
+            "result": {
+                "voltage_V": voltage,
+                "unit": "V",
+                "mode": "dc_voltage",
+            },
+            "features": features,
+        }
+
+    def measure_impedance(
+        self,
+        net: str,
+        net_info: dict[str, Any],
+        symptom: str,
+    ) -> dict[str, Any]:
+        resistance_ohm = self._synthesize_impedance(net, net_info, symptom)
+        features = {
+            "resistance_ohm": resistance_ohm,
+            "short_to_ground": resistance_ohm < 10.0,
+            "low_impedance": resistance_ohm < 100.0,
+            "open_like": resistance_ohm > 1_000_000.0,
+        }
+        return {
+            "result": {
+                "resistance_ohm": resistance_ohm,
+                "unit": "ohm",
+                "mode": "resistance_2w",
+            },
+            "features": features,
+        }
+
+    def status(self) -> dict[str, Any]:
+        return {"id": self.id, "kind": "dmm", "backend": "mock", "modes": ["dc_voltage", "resistance_2w"]}
+
+    def _synthesize_voltage(
+        self,
+        net: str,
+        expected_voltage: dict[str, Any] | None,
+        symptom: str,
+    ) -> float:
+        symptom_l = symptom.lower()
+        net_u = net.upper()
+        if net_u == "GND":
+            return 0.0
+        if expected_voltage:
+            minimum = float(expected_voltage["min"])
+            maximum = float(expected_voltage["max"])
+            nominal = (minimum + maximum) / 2.0
+            if any(token in symptom_l for token in ("overvoltage", "too high", "exceeds")):
+                return round(maximum * 1.12, 6)
+            if any(token in symptom_l for token in ("does not stay", "collapse", "low", "brownout")) and net_u in {
+                "VOUT_3V3",
+                "3V3",
+            }:
+                return round(minimum * 0.35, 6)
+            if any(token in symptom_l for token in ("power good low", "pg low", "pgood low")) and net_u.startswith("PG"):
+                return 0.0
+            return round(nominal, 6)
+        if "EN" in net_u or "PG" in net_u:
+            return 3.3
+        return 0.0
+
+    def _synthesize_impedance(self, net: str, net_info: dict[str, Any], symptom: str) -> float:
+        symptom_l = symptom.lower()
+        net_u = net.upper()
+        if net_u == "GND":
+            return 0.08
+        if any(token in symptom_l for token in ("short", "shorted", "overcurrent")) and net_info.get("domain") == "power":
+            return 1.4
+        if net_info.get("domain") == "power":
+            return 47_000.0
+        if net_info.get("domain") == "digital":
+            return 100_000.0
+        return 1_000_000.0
 
 
 def extract_waveform_features(samples: list[tuple[float, float]]) -> dict[str, Any]:
@@ -336,6 +460,69 @@ class ScpiScope:
         }
 
 
+@dataclass
+class ScpiDmm:
+    resource: str
+    id: str = "scpi_dmm"
+    timeout_ms: int = 5000
+    dc_voltage_query: str = "MEASure:VOLTage:DC?"
+    resistance_query: str = "MEASure:RESistance?"
+
+    def __post_init__(self) -> None:
+        self.connection = ScpiConnection(self.resource, self.timeout_ms)
+
+    def measure_dc_voltage(
+        self,
+        net: str,
+        expected_voltage: dict[str, Any] | None,
+        symptom: str,
+    ) -> dict[str, Any]:
+        voltage = _safe_float_query(self.connection, self.dc_voltage_query)
+        if voltage is None:
+            raise RuntimeError("SCPI DMM returned no DC voltage value")
+        features: dict[str, Any] = {"voltage_V": voltage}
+        if expected_voltage:
+            minimum = float(expected_voltage["min"])
+            maximum = float(expected_voltage["max"])
+            features.update(
+                {
+                    "expected_min_V": minimum,
+                    "expected_max_V": maximum,
+                    "below_expected": voltage < minimum,
+                    "above_expected": voltage > maximum,
+                    "within_expected": minimum <= voltage <= maximum,
+                    "margin_to_min_V": round(voltage - minimum, 6),
+                    "margin_to_max_V": round(maximum - voltage, 6),
+                }
+            )
+        return {
+            "result": {"voltage_V": voltage, "unit": "V", "mode": "dc_voltage"},
+            "features": features,
+        }
+
+    def measure_impedance(
+        self,
+        net: str,
+        net_info: dict[str, Any],
+        symptom: str,
+    ) -> dict[str, Any]:
+        resistance = _safe_float_query(self.connection, self.resistance_query)
+        if resistance is None:
+            raise RuntimeError("SCPI DMM returned no resistance value")
+        return {
+            "result": {"resistance_ohm": resistance, "unit": "ohm", "mode": "resistance_2w"},
+            "features": {
+                "resistance_ohm": resistance,
+                "short_to_ground": resistance < 10.0,
+                "low_impedance": resistance < 100.0,
+                "open_like": resistance > 1_000_000.0,
+            },
+        }
+
+    def status(self) -> dict[str, Any]:
+        return {"id": self.id, "kind": "dmm", "backend": "scpi", "resource": self.resource}
+
+
 def build_psu_driver(config: dict[str, Any] | None) -> PsuDriver:
     if not config or config.get("backend", "mock") == "mock":
         return MockPsu(id=config.get("id", "mock_psu_ch1") if config else "mock_psu_ch1")
@@ -363,6 +550,20 @@ def build_scope_driver(config: dict[str, Any] | None) -> ScopeDriver:
             sample_interval_s=config.get("sample_interval_s"),
         )
     raise ValueError(f"Unsupported scope backend: {config.get('backend')}")
+
+
+def build_dmm_driver(config: dict[str, Any] | None) -> DmmDriver:
+    if not config or config.get("backend", "mock") == "mock":
+        dmm = MockDmm()
+        dmm.id = config.get("id", "mock_dmm") if config else "mock_dmm"
+        return dmm
+    if config.get("backend") == "scpi":
+        return ScpiDmm(
+            resource=str(config["resource"]),
+            id=str(config.get("id", "scpi_dmm")),
+            timeout_ms=int(config.get("timeout_ms", 5000)),
+        )
+    raise ValueError(f"Unsupported DMM backend: {config.get('backend')}")
 
 
 def _safe_float_query(connection: ScpiConnection, query: str) -> float | None:

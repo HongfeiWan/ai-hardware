@@ -272,6 +272,12 @@ class DiagnosticSession:
                     "channels": ["CH1", "CH2", "CH3", "CH4"],
                 },
                 {
+                    "id": "mock_dmm",
+                    "kind": "dmm",
+                    "vendor": "ai-hardware",
+                    "model": "MockDMM",
+                },
+                {
                     "id": "mock_fixture",
                     "kind": "esp32_fixture",
                     "vendor": "ai-hardware",
@@ -305,4 +311,3 @@ class DiagnosticSession:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(self.data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return target
-
