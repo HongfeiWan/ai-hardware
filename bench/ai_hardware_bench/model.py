@@ -48,6 +48,7 @@ class RuleBasedModelAdapter:
         low_voltage_rails: list[str] = []
         over_voltage_rails: list[str] = []
         ripple_rails: list[str] = []
+        low_enable_nets: list[str] = []
         current_limited = False
         for measurement in session.data["measurements"]:
             target_net = measurement.get("target", {}).get("net")
@@ -78,6 +79,16 @@ class RuleBasedModelAdapter:
                         evidence.append(
                             f"{target_net} ripple is {v_pp} Vpp, above the rule-of-thumb limit."
                         )
+            if measurement.get("kind") == "dc_voltage" and target_net in board.nets:
+                expected = board.nets[target_net].get("expected_voltage")
+                voltage = features.get("voltage_V")
+                if expected and voltage is not None and voltage < float(expected["min"]):
+                    for rail in board.rails.values():
+                        if rail.get("enable_net") == target_net:
+                            low_enable_nets.append(target_net)
+                            evidence.append(
+                                f"{target_net} measures {voltage} V, below the enable threshold {expected['min']} V."
+                            )
         if over_voltage_rails:
             summary = f"{over_voltage_rails[0]} is above its expected voltage range; stop power before further probing."
             confidence = 0.82
@@ -89,6 +100,24 @@ class RuleBasedModelAdapter:
                 "requires_confirmation": False,
             }
             action_net = over_voltage_rails[0]
+        elif low_enable_nets:
+            action_net = low_enable_nets[0]
+            affected_rails = [rail for rail in board.rails.values() if rail.get("enable_net") == action_net]
+            affected_rail = affected_rails[0] if affected_rails else None
+            summary = f"{action_net} is below its expected enable voltage; the downstream rail is likely disabled."
+            confidence = 0.7
+            severity = "fault"
+            component = _first_component_on_net(board, action_net)
+            action = {
+                "type": "inspect_component",
+                "net": action_net,
+                "component": component.get("designator") if component else None,
+                "reason": "Trace the enable source or pull network before probing the switching node.",
+                "risk_level": board.nets[action_net].get("risk_level", "low"),
+                "requires_confirmation": board.nets[action_net].get("risk_level") == "high",
+            }
+            if affected_rail:
+                evidence.append(f"{action_net} controls rail {affected_rail['name']}.")
         elif low_voltage_rails and current_limited:
             summary = f"{low_voltage_rails[0]} likely collapses because the upstream rail is current-limited."
             confidence = 0.72
@@ -122,7 +151,12 @@ class RuleBasedModelAdapter:
             "severity": severity,
             "evidence": evidence,
             "related_nets": sorted(
-                related_nets | set(low_voltage_rails) | set(over_voltage_rails) | set(ripple_rails) | {action_net}
+                related_nets
+                | set(low_voltage_rails)
+                | set(over_voltage_rails)
+                | set(ripple_rails)
+                | set(low_enable_nets)
+                | {action_net}
             ),
             "related_components": [item["designator"] for item in topology.components_on_net(action_net)],
         }
@@ -290,6 +324,14 @@ def _first_point_for(board: BoardContext, net: str, measurement: str) -> dict[st
         allowed = point.get("allowed_measurements") or []
         if point["net"] == net and (measurement in allowed or not allowed):
             return point
+    return None
+
+
+def _first_component_on_net(board: BoardContext, net: str) -> dict[str, Any] | None:
+    for component in board.components.values():
+        for pin in component.get("pins", []) or []:
+            if pin.get("net") == net:
+                return component
     return None
 
 

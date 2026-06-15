@@ -270,6 +270,10 @@ class MockDmm:
             nominal = (minimum + maximum) / 2.0
             if any(token in symptom_l for token in ("overvoltage", "too high", "exceeds")):
                 return round(maximum * 1.12, 6)
+            if any(token in symptom_l for token in ("enable low", "en low", "not enabled", "disabled")) and (
+                net_u.startswith("EN") or "_EN" in net_u
+            ):
+                return 0.0
             if any(token in symptom_l for token in ("does not stay", "collapse", "low", "brownout")) and net_u in {
                 "VOUT_3V3",
                 "3V3",

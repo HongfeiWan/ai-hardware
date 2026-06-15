@@ -334,7 +334,7 @@ class BenchApp:
         board = self.require_board()
         session = self.require_session()
         net_name = board.canonical_net(net)
-        point = self._resolve_test_point(net_name, test_point, "dc_voltage")
+        point = self._resolve_test_point(net_name, test_point, "dc_voltage", required=False)
         captured = self.dmm.measure_dc_voltage(
             net_name,
             board.nets[net_name].get("expected_voltage"),

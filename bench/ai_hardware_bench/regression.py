@@ -44,7 +44,10 @@ def run_regression_suite(
 def run_regression_task(task: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
     output_session = artifact_dir / "session.json"
     app = BenchApp(artifact_dir)
-    result = app.demo(task["board"], task["symptom"], output_session)
+    if "tool_calls" in task:
+        result = _run_custom_workflow(app, task, output_session)
+    else:
+        result = app.demo(task["board"], task["symptom"], output_session)
     validation = validate_session_file(output_session)
     finding = result["diagnosis"]["finding"]
     actions = result["diagnosis"].get("next_actions", [])
@@ -75,8 +78,41 @@ def _load_tasks(path: str | Path) -> list[dict[str, Any]]:
         for field in ("id", "board", "symptom"):
             if field not in task:
                 raise ValueError(f"tasks[{index}] is missing {field}")
+        if "tool_calls" in task:
+            _validate_tool_calls(task["tool_calls"], f"tasks[{index}].tool_calls")
         tasks.append(task)
     return tasks
+
+
+def _run_custom_workflow(app: BenchApp, task: dict[str, Any], output_session: Path) -> dict[str, Any]:
+    loaded = app.load_board_context_tool(task["board"], observed_symptom=task["symptom"])
+    calls = []
+    for call in task.get("tool_calls", []) or []:
+        name = call["name"]
+        arguments = call.get("arguments", {})
+        calls.append({"name": name, "result": app.call_tool(name, arguments)})
+    diagnosis = app.call_tool("diagnose_hardware", {})
+    saved = app.save_session(output_session)
+    return {
+        "ok": saved["ok"],
+        "loaded": loaded,
+        "tool_calls": calls,
+        "diagnosis": diagnosis,
+        "session_path": saved["path"],
+    }
+
+
+def _validate_tool_calls(calls: Any, prefix: str) -> None:
+    if not isinstance(calls, list) or not calls:
+        raise ValueError(f"{prefix} must be a non-empty list")
+    for index, call in enumerate(calls):
+        if not isinstance(call, dict):
+            raise ValueError(f"{prefix}[{index}] must be an object")
+        if not isinstance(call.get("name"), str) or not call["name"]:
+            raise ValueError(f"{prefix}[{index}].name is required")
+        arguments = call.get("arguments", {})
+        if not isinstance(arguments, dict):
+            raise ValueError(f"{prefix}[{index}].arguments must be an object")
 
 
 def _check_expected(expected: dict[str, Any], finding: dict[str, Any], actions: list[dict[str, Any]]) -> list[str]:

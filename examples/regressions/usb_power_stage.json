@@ -30,6 +30,32 @@
         "summary_contains": "above",
         "next_action_type": "stop"
       }
+    },
+    {
+      "id": "usb_power_stage_enable_low",
+      "board": "examples/boards/usb_power_stage.yaml",
+      "symptom": "3V3 rail is disabled because EN_3V3 enable low is not asserted.",
+      "tool_calls": [
+        {
+          "name": "measure_dc_voltage",
+          "arguments": {
+            "net": "EN_3V3"
+          }
+        },
+        {
+          "name": "capture_waveform",
+          "arguments": {
+            "net": "VOUT_3V3",
+            "sample_count": 64
+          }
+        }
+      ],
+      "expected": {
+        "severity": "fault",
+        "summary_contains": "EN_3V3",
+        "next_action_net": "EN_3V3",
+        "next_action_type": "inspect_component"
+      }
     }
   ]
 }

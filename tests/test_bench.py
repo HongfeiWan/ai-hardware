@@ -267,6 +267,18 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertIn("ripple", result["finding"]["summary"])
             self.assertEqual(result["next_actions"][0]["net"], "SW_NODE")
 
+    def test_rule_model_detects_enable_low(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.load_board_context_tool(str(BOARD), observed_symptom="3V3 rail disabled because EN_3V3 enable low")
+            voltage = app.call_tool("measure_dc_voltage", {"net": "EN_3V3"})
+            self.assertEqual(voltage["measurement"]["target"], {"net": "EN_3V3"})
+            result = app.call_tool("diagnose_hardware", {})
+            self.assertEqual(result["finding"]["severity"], "fault")
+            self.assertIn("EN_3V3", result["finding"]["summary"])
+            self.assertEqual(result["next_actions"][0]["type"], "inspect_component")
+            self.assertEqual(result["next_actions"][0]["net"], "EN_3V3")
+
     def test_json_http_model_output_is_validated_and_saved(self) -> None:
         payload = {
             "finding": {
@@ -356,8 +368,8 @@ class BenchPrototypeTest(unittest.TestCase):
             suite = ROOT / "examples" / "regressions" / "usb_power_stage.json"
             result = run_regression_suite(suite, Path(tmp) / "regression")
             self.assertTrue(result["ok"], result)
-            self.assertEqual(result["count"], 3)
-            self.assertEqual(result["passed"], 3)
+            self.assertEqual(result["count"], 4)
+            self.assertEqual(result["passed"], 4)
 
     def test_html_report_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
