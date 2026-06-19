@@ -742,7 +742,7 @@ class BenchApp:
     def save_session(self, path: str | Path) -> dict[str, Any]:
         session = self.require_session()
         target = session.save(path)
-        validation = validate_session_file(target, check_artifacts=True)
+        validation = validate_session_file(target, check_artifacts=True, board=self.board)
         return {"ok": validation["ok"], "path": str(target), "validation_errors": validation["errors"]}
 
     def demo(self, board_path: str | Path, symptom: str, output_session: str | Path | None = None) -> dict[str, Any]:

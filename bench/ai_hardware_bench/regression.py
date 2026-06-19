@@ -48,7 +48,7 @@ def run_regression_task(task: dict[str, Any], artifact_dir: Path) -> dict[str, A
         result = _run_custom_workflow(app, task, output_session)
     else:
         result = app.demo(task["board"], task["symptom"], output_session)
-    validation = validate_session_file(output_session)
+    validation = validate_session_file(output_session, board=task["board"])
     finding = result["diagnosis"]["finding"]
     actions = result["diagnosis"].get("next_actions", [])
     checks = _check_expected(task.get("expected", {}), finding, actions)
