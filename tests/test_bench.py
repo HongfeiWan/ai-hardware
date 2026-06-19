@@ -15,6 +15,7 @@ from ai_hardware_bench.mcp_server import StdioJsonRpcServer
 from ai_hardware_bench.model import ModelOutputValidationError
 from ai_hardware_bench.regression import run_regression_suite
 from ai_hardware_bench.report import generate_session_report
+from ai_hardware_bench.session import validate_session
 from ai_hardware_bench.web import create_console_server
 
 
@@ -71,6 +72,39 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertTrue(artifact_path.exists())
             audit = app.read_audit_log()
             self.assertGreaterEqual(audit["count"], 2)
+
+    def test_session_validation_rejects_schema_shape_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session_path = Path(tmp) / "session.json"
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.demo(BOARD, "3V3 rail does not stay up after USB input is applied.", session_path)
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+
+            session["instruments"][0]["kind"] = "magic_probe"
+            session["measurements"][0]["kind"] = "bad_kind"
+            session["measurements"][0]["instrument_id"] = "missing_instrument"
+            session["measurements"][0]["artifact_ids"] = "not-a-list"
+            session["findings"][0]["severity"] = "maybe"
+            session["next_actions"][0]["type"] = "teleport_probe"
+            session["next_actions"][0]["risk_level"] = "extreme"
+            session["next_actions"][0]["requires_confirmation"] = "yes"
+            session["artifacts"][0]["kind"] = "bad_artifact"
+            session["artifacts"][0]["sha256"] = "not-a-sha"
+            session["artifacts"].append(dict(session["artifacts"][0]))
+
+            errors = validate_session(session, check_artifacts=False)
+            joined = "\n".join(errors)
+            self.assertIn("instrument[0].kind is not supported: magic_probe", joined)
+            self.assertIn("measurement[0].kind is not supported: bad_kind", joined)
+            self.assertIn("measurement[0].instrument_id references unknown instrument missing_instrument", joined)
+            self.assertIn("measurement[0].artifact_ids must be a list of strings", joined)
+            self.assertIn("finding[0].severity is not supported: maybe", joined)
+            self.assertIn("next_actions[0].type is not supported: teleport_probe", joined)
+            self.assertIn("next_actions[0].risk_level is not supported: extreme", joined)
+            self.assertIn("next_actions[0].requires_confirmation must be boolean", joined)
+            self.assertIn("artifact[0].kind is not supported: bad_artifact", joined)
+            self.assertIn("artifact[0].sha256 must be a 64-character hex string", joined)
+            self.assertIn("Duplicate artifact id:", joined)
 
     def test_power_safety_rejects_overcurrent(self) -> None:
         app = BenchApp()
