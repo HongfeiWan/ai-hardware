@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_sess = sub.add_parser("validate-session", help="Validate a diagnostic session JSON file")
     validate_sess.add_argument("path")
     validate_sess.add_argument("--no-artifacts", action="store_true", help="Skip artifact existence/hash checks")
+    validate_sess.add_argument("--board", help="Optional board context file for net/component/test point reference checks")
 
     demo = sub.add_parser("demo", help="Run a full mock diagnostic flow")
     demo.add_argument("--board", default="examples/boards/usb_power_stage.yaml")
@@ -128,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "validate-session":
-        result = validate_session_file(args.path, check_artifacts=not args.no_artifacts)
+        result = validate_session_file(args.path, check_artifacts=not args.no_artifacts, board=args.board)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["ok"] else 1
     if args.command == "demo":

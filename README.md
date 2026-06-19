@@ -135,7 +135,8 @@ python3 tools/bench.py validate-board examples/boards/usb_power_stage.yaml
 python3 tools/bench.py demo \
   --board examples/boards/usb_power_stage.yaml \
   --output-session artifacts/mock-bench/session.json
-python3 tools/bench.py validate-session artifacts/mock-bench/session.json
+python3 tools/bench.py validate-session artifacts/mock-bench/session.json \
+  --board examples/boards/usb_power_stage.yaml
 python3 tools/bench.py run-regression
 python3 tools/bench.py run-regression \
   --suite examples/regressions/usb_power_stage.json \
@@ -213,8 +214,11 @@ python3 tools/bench.py call-tool plan_initial_measurements \
   --arguments '{"max_actions":6,"risk_ceiling":"medium"}'
 python3 tools/bench.py call-tool safety_status --board examples/boards/usb_power_stage.yaml
 python3 tools/bench.py call-tool read_audit_log --board examples/boards/usb_power_stage.yaml
-python3 tools/bench.py validate-session artifacts/mock-bench/session.json
+python3 tools/bench.py validate-session artifacts/mock-bench/session.json \
+  --board examples/boards/usb_power_stage.yaml
 ```
+
+`validate-session --board` 会在基础 session 结构、artifact 存在性和 SHA-256 之外，额外检查 measurement、finding 和 next action 里引用的 net、component、pin、test point 是否存在并匹配当前板级上下文；不需要检查 artifact 文件时可以加 `--no-artifacts`。
 
 可回归诊断任务集放在 [examples/regressions](examples/regressions)。`run-regression --suite` 会逐个运行任务、保存 session/artifact/audit，并检查预期 severity、summary 片段、下一步测量网标或动作类型；任务也可以用 `tool_calls` 声明诊断前要执行的测量序列。当前 USB 电源链路样板覆盖 3V3 输出塌陷、输出纹波过大、输出过压停机、enable 未拉高、power-good 未释放、电源轨对地短路、Buck 开关节点不切换、reset 未释放、MCU 时钟不起振、I2C 总线被拉低和 LDO 输入正常但输出异常。`report` 会把 session 和 audit 汇总成一个静态 HTML 报告，便于回看诊断证据、测量特征、artifact 引用、波形/逻辑 CSV 预览和工具调用记录。
 

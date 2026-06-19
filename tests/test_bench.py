@@ -106,6 +106,44 @@ class BenchPrototypeTest(unittest.TestCase):
             self.assertIn("artifact[0].sha256 must be a 64-character hex string", joined)
             self.assertIn("Duplicate artifact id:", joined)
 
+    def test_session_validation_checks_board_references(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session_path = Path(tmp) / "session.json"
+            app = BenchApp(Path(tmp) / "artifacts")
+            app.demo(BOARD, "3V3 rail does not stay up after USB input is applied.", session_path)
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            board = load_board_context(BOARD)
+
+            session["board_id"] = "wrong_board"
+            session["measurements"][0]["target"]["net"] = "VOUT_3V3"
+            session["measurements"][0]["target"]["test_point"] = "TP1"
+            session["measurements"][0]["target"]["component"] = "MISSING_COMPONENT"
+            session["measurements"][0]["target"]["pin"] = "1"
+            session["findings"][0]["related_nets"] = ["MISSING_NET"]
+            session["findings"][0]["related_components"] = ["MISSING_COMPONENT"]
+            session["next_actions"] = [
+                {
+                    "type": "measure_net",
+                    "net": "SW_NODE",
+                    "test_point": "TP3",
+                    "component": "MISSING_COMPONENT",
+                    "reason": "Probe a high-risk net without confirmation.",
+                    "risk_level": "high",
+                    "requires_confirmation": False,
+                }
+            ]
+
+            errors = validate_session(session, check_artifacts=False, board=board)
+            joined = "\n".join(errors)
+            self.assertIn("session board_id wrong_board does not match board context usb_power_stage_demo", joined)
+            self.assertIn("measurement[0].target.test_point TP1 is not on net VOUT_3V3", joined)
+            self.assertIn("measurement[0].target.component references unknown component MISSING_COMPONENT", joined)
+            self.assertIn("finding[0].related_nets references unknown net MISSING_NET", joined)
+            self.assertIn("finding[0].related_components references unknown component MISSING_COMPONENT", joined)
+            self.assertIn("next_actions[0].test_point TP3 is not on net SW_NODE", joined)
+            self.assertIn("next_actions[0].component references unknown component MISSING_COMPONENT", joined)
+            self.assertIn("next_actions[0] targets high-risk net SW_NODE without requires_confirmation=true", joined)
+
     def test_power_safety_rejects_overcurrent(self) -> None:
         app = BenchApp()
         app.load_board_context_tool(str(BOARD))

@@ -140,9 +140,9 @@ class BenchApp:
 
     def validate_session_tool(self, path: str | None = None, check_artifacts: bool = True) -> dict[str, Any]:
         if path:
-            return validate_session_file(path, check_artifacts=check_artifacts)
+            return validate_session_file(path, check_artifacts=check_artifacts, board=self.board)
         session = self.require_session()
-        errors = validate_session(session.data, check_artifacts=check_artifacts)
+        errors = validate_session(session.data, check_artifacts=check_artifacts, board=self.board)
         return {"ok": not errors, "session_id": session.session_id, "errors": errors}
 
     def read_audit_log(self, limit: int | None = 50) -> dict[str, Any]:
