@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .bench import BenchApp
+from .bench import BenchApp, _nullable_string, _schema, _validate_object_schema
 
 
 PROMPT_DEFINITIONS = [
@@ -15,6 +15,7 @@ PROMPT_DEFINITIONS = [
         "arguments": [
             {"name": "rail", "description": "Rail name or output net to focus on.", "required": False},
         ],
+        "inputSchema": _schema({"rail": _nullable_string("Rail name or output net to focus on.")}),
     },
     {
         "name": "diagnose_boot_sequence",
@@ -22,6 +23,7 @@ PROMPT_DEFINITIONS = [
         "arguments": [
             {"name": "rail", "description": "Optional rail name to anchor the sequence.", "required": False},
         ],
+        "inputSchema": _schema({"rail": _nullable_string("Optional rail name to anchor the sequence.")}),
     },
     {
         "name": "plan_next_measurement",
@@ -29,6 +31,7 @@ PROMPT_DEFINITIONS = [
         "arguments": [
             {"name": "focus_net", "description": "Optional net that should guide the next probe.", "required": False},
         ],
+        "inputSchema": _schema({"focus_net": _nullable_string("Optional net that should guide the next probe.")}),
     },
 ]
 
@@ -39,6 +42,10 @@ def list_prompts() -> list[dict[str, Any]]:
 
 def get_prompt(app: BenchApp, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     args = arguments or {}
+    if not isinstance(args, dict):
+        raise ValueError("prompt arguments must be an object")
+    definition = _prompt_definition(name)
+    _validate_object_schema(name, args, definition["inputSchema"])
     board = app.require_board()
     session = app.require_session()
     if name == "diagnose_power_rail":
@@ -50,7 +57,7 @@ def get_prompt(app: BenchApp, name: str, arguments: dict[str, Any] | None = None
     else:
         raise ValueError(f"Unknown prompt: {name}")
     return {
-        "description": next(item["description"] for item in PROMPT_DEFINITIONS if item["name"] == name),
+        "description": definition["description"],
         "messages": [
             {
                 "role": "user",
@@ -65,6 +72,13 @@ def get_prompt(app: BenchApp, name: str, arguments: dict[str, Any] | None = None
             "session_id": session.session_id,
         },
     }
+
+
+def _prompt_definition(name: str) -> dict[str, Any]:
+    for definition in PROMPT_DEFINITIONS:
+        if definition["name"] == name:
+            return definition
+    raise ValueError(f"Unknown prompt: {name}")
 
 
 def _diagnose_power_rail(app: BenchApp, rail: Any) -> str:
@@ -154,4 +168,3 @@ def _measurement_summary(session: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _first_rail_name(board: Any) -> str:
     return next(iter(board.rails), "unknown")
-

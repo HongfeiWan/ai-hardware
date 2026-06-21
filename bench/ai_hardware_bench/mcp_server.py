@@ -104,6 +104,8 @@ class StdioJsonRpcServer:
                             }
                         )
             return {"resources": resources}
+        if method == "resources/templates/list":
+            return {"resourceTemplates": _resource_templates()}
         if method == "resources/read":
             uri = params.get("uri")
             payload = self.app.read_resource(uri)
@@ -152,6 +154,41 @@ class StdioJsonRpcServer:
         body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
         sys.stdout.buffer.flush()
+
+
+def _resource_templates() -> list[dict[str, Any]]:
+    return [
+        {
+            "uriTemplate": "board://context/{board_id}",
+            "name": "Board context",
+            "description": "Loaded board_context JSON for a board id.",
+            "mimeType": "application/json",
+        },
+        {
+            "uriTemplate": "board://topology/{board_id}",
+            "name": "Board topology",
+            "description": "Topology summary including nets, rails and test point relationships.",
+            "mimeType": "application/json",
+        },
+        {
+            "uriTemplate": "board://net/{board_id}/{net_name}",
+            "name": "Board net",
+            "description": "Neighbor trace and topology context for a single net.",
+            "mimeType": "application/json",
+        },
+        {
+            "uriTemplate": "session://measurements/{session_id}",
+            "name": "Diagnostic session",
+            "description": "Measurements, findings, next actions and artifacts for a diagnostic session.",
+            "mimeType": "application/json",
+        },
+        {
+            "uriTemplate": "session://artifacts/{session_id}/{artifact_id}",
+            "name": "Session artifact",
+            "description": "Artifact metadata and inline text for text-like artifacts.",
+            "mimeType": "application/octet-stream",
+        },
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:

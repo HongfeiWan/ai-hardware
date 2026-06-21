@@ -171,14 +171,64 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["board_id"], "usb_power_stage_demo")
 
+    def test_mcp_tools_list_exposes_input_schemas(self) -> None:
+        app = BenchApp()
+        server = StdioJsonRpcServer(app)
+        response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        self.assertIsNotNone(response)
+        tools = {tool["name"]: tool for tool in response["result"]["tools"]}
+        self.assertEqual(set(tools), set(app.tools))
+        for tool in tools.values():
+            schema = tool.get("inputSchema")
+            self.assertIsInstance(schema, dict)
+            self.assertEqual(schema["type"], "object")
+            self.assertIn("properties", schema)
+            self.assertIn("required", schema)
+            self.assertFalse(schema["additionalProperties"])
+
+        load_schema = tools["load_board_context"]["inputSchema"]
+        self.assertEqual(load_schema["required"], ["path"])
+        self.assertEqual(load_schema["properties"]["path"]["type"], "string")
+
+        waveform_schema = tools["capture_waveform"]["inputSchema"]
+        self.assertEqual(waveform_schema["required"], ["net"])
+        self.assertIn("confirm", waveform_schema["properties"])
+        self.assertEqual(waveform_schema["properties"]["sample_count"]["minimum"], 1)
+
+        mux_schema = tools["esp32_set_mux"]["inputSchema"]
+        self.assertEqual(mux_schema["properties"]["channel"]["maximum"], 31)
+        self.assertIn("dry_run", mux_schema["properties"])
+
+    def test_tool_calls_validate_input_schema_before_execution(self) -> None:
+        app = BenchApp()
+        app.load_board_context_tool(str(BOARD))
+        with self.assertRaisesRegex(ValueError, "capture_waveform.net is required"):
+            app.call_tool("capture_waveform", {"sample_count": 32})
+        with self.assertRaisesRegex(ValueError, "capture_waveform.sample_count must be >= 1"):
+            app.call_tool("capture_waveform", {"net": "VOUT_3V3", "sample_count": 0})
+        with self.assertRaisesRegex(ValueError, "list_nets.domain must be one of"):
+            app.call_tool("list_nets", {"domain": "bad_domain"})
+        with self.assertRaisesRegex(ValueError, "measure_dc_voltage.extra is not a supported argument"):
+            app.call_tool("measure_dc_voltage", {"net": "VOUT_3V3", "extra": True})
+
+        with self.assertRaises(PermissionError):
+            app.call_tool("capture_waveform", {"net": "SW_NODE", "extra": True})
+        audit = app.read_audit_log()
+        self.assertTrue(audit["events"][-1]["safety"]["requires_confirmation"])
+
     def test_mcp_prompts_list_and_get(self) -> None:
         app = BenchApp()
         app.demo(BOARD, "3V3 rail does not stay up after USB input is applied.")
         server = StdioJsonRpcServer(app)
         listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "prompts/list", "params": {}})
         self.assertIsNotNone(listed)
-        prompt_names = {item["name"] for item in listed["result"]["prompts"]}
+        prompts = {item["name"]: item for item in listed["result"]["prompts"]}
+        prompt_names = set(prompts)
         self.assertIn("diagnose_power_rail", prompt_names)
+        rail_schema = prompts["diagnose_power_rail"]["inputSchema"]
+        self.assertEqual(rail_schema["type"], "object")
+        self.assertFalse(rail_schema["additionalProperties"])
+        self.assertEqual(rail_schema["properties"]["rail"]["type"], ["string", "null"])
 
         fetched = server.handle(
             {
@@ -194,11 +244,40 @@ class BenchPrototypeTest(unittest.TestCase):
         self.assertIn("USB Power Stage Demo", message)
         self.assertIn("Relevant measurements", message)
 
+        bad_prompt = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "prompts/get",
+                "params": {"name": "plan_next_measurement", "arguments": {"focus_net": 42}},
+            }
+        )
+        self.assertIsNotNone(bad_prompt)
+        self.assertIn("error", bad_prompt)
+        self.assertIn("plan_next_measurement.focus_net must be", bad_prompt["error"]["message"])
+
+        unknown_arg = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "prompts/get",
+                "params": {"name": "diagnose_boot_sequence", "arguments": {"extra": "nope"}},
+            }
+        )
+        self.assertIsNotNone(unknown_arg)
+        self.assertIn("diagnose_boot_sequence.extra is not a supported argument", unknown_arg["error"]["message"])
+
     def test_mcp_resources_include_nets_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = BenchApp(Path(tmp) / "artifacts")
             app.demo(BOARD, "3V3 rail does not stay up after USB input is applied.")
             server = StdioJsonRpcServer(app)
+            templates = server.handle({"jsonrpc": "2.0", "id": 0, "method": "resources/templates/list", "params": {}})
+            self.assertIsNotNone(templates)
+            uri_templates = {item["uriTemplate"] for item in templates["result"]["resourceTemplates"]}
+            self.assertIn("board://net/{board_id}/{net_name}", uri_templates)
+            self.assertIn("session://artifacts/{session_id}/{artifact_id}", uri_templates)
+
             listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}})
             self.assertIsNotNone(listed)
             uris = {item["uri"] for item in listed["result"]["resources"]}

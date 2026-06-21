@@ -654,6 +654,7 @@ class BenchApp:
         decision = self.safety.evaluate(name, tool_arguments, self.board)
         try:
             decision.require_allowed()
+            _validate_tool_arguments(name, tool_arguments)
             call_arguments = dict(tool_arguments)
             call_arguments.pop("confirm", None)
             result = self.tools[name](**call_arguments)
@@ -665,32 +666,12 @@ class BenchApp:
 
     def list_tools(self) -> list[dict[str, Any]]:
         return [
-            {"name": name, "description": description}
-            for name, description in {
-                "load_board_context": "Load and validate a board context file.",
-                "instrument_status": "Report configured bench instrument backends.",
-                "model_status": "Report configured model adapter backend.",
-                "safety_status": "Report safety policy and audit log location.",
-                "validate_session": "Validate the current or saved diagnostic session.",
-                "read_audit_log": "Read recent JSONL audit events.",
-                "plan_initial_measurements": "Plan a low-risk first measurement sequence.",
-                "list_nets": "List nets with optional domain/risk filters.",
-                "trace_net_neighbors": "Trace component, rail and test point neighbors for a net.",
-                "find_test_points": "Find test points by net, measurement kind or risk level.",
-                "trace_power_path": "Trace upstream rails feeding a target net.",
-                "list_downstream_loads": "List nearby downstream load components for a rail or net.",
-                "set_power_rail": "Safety-check and mock a programmable PSU rail action.",
-                "measure_dc_voltage": "Measure DC voltage on a net with the configured DMM.",
-                "measure_impedance": "Measure power-off impedance on a net with the configured DMM.",
-                "capture_waveform": "Capture a synthetic mock waveform and write a CSV artifact.",
-                "capture_logic": "Capture a digital logic trace and write a CSV artifact.",
-                "capture_scope_screenshot": "Capture a scope screenshot artifact for a net.",
-                "extract_signal_features": "Extract basic voltage features from a waveform CSV.",
-                "diagnose_hardware": "Run rule-based diagnosis over current session measurements.",
-                "suggest_next_probe": "Suggest low-risk next measurements.",
-                "esp32_set_mux": "Mock the ESP32 fixture MUX tool.",
-                "esp32_reset_dut": "Mock the ESP32 fixture DUT reset tool.",
-            }.items()
+            {
+                "name": name,
+                "description": definition["description"],
+                "inputSchema": definition["inputSchema"],
+            }
+            for name, definition in _tool_definitions().items()
         ]
 
     def read_resource(self, uri: str) -> dict[str, Any]:
@@ -884,6 +865,267 @@ class BenchApp:
             self.logic.status(),
             {"id": "mock_fixture", "kind": "esp32_fixture", "backend": "mock"},
         ]
+
+
+def _tool_definitions() -> dict[str, dict[str, Any]]:
+    empty = _schema({})
+    net_arg = {"net": _string("Net name or alias.")}
+    test_point_arg = {"test_point": _nullable_string("Optional test point id.")}
+    confirm_arg = {"confirm": _boolean("Required by the safety policy for high-risk or non-dry-run actions.")}
+    dry_run_arg = {"dry_run": _boolean("Keep the action in mock/dry-run mode.")}
+    sample_args = {
+        "sample_count": _integer("Number of samples to capture.", minimum=1),
+        "duration_s": _number("Capture duration in seconds.", minimum=0),
+    }
+    return {
+        "load_board_context": {
+            "description": "Load and validate a board context file.",
+            "inputSchema": _schema(
+                {
+                    "path": _string("Path to a JSON/YAML board context file."),
+                    "observed_symptom": _string("Observed DUT symptom."),
+                    "session_id": _nullable_string("Optional session id override."),
+                    "operator": _string("Operator name recorded in the session."),
+                },
+                ["path"],
+            ),
+        },
+        "instrument_status": {"description": "Report configured bench instrument backends.", "inputSchema": empty},
+        "model_status": {"description": "Report configured model adapter backend.", "inputSchema": empty},
+        "safety_status": {"description": "Report safety policy and audit log location.", "inputSchema": empty},
+        "validate_session": {
+            "description": "Validate the current or saved diagnostic session.",
+            "inputSchema": _schema(
+                {
+                    "path": _nullable_string("Optional saved session file to validate."),
+                    "check_artifacts": _boolean("Check artifact existence and sha256 hashes."),
+                }
+            ),
+        },
+        "read_audit_log": {
+            "description": "Read recent JSONL audit events.",
+            "inputSchema": _schema({"limit": _nullable_integer("Maximum number of recent audit events.", minimum=1)}),
+        },
+        "plan_initial_measurements": {
+            "description": "Plan a low-risk first measurement sequence.",
+            "inputSchema": _schema(
+                {
+                    "max_actions": _integer("Maximum actions to return.", minimum=1, maximum=20),
+                    "risk_ceiling": _enum("Maximum action risk level.", ["low", "medium", "high"]),
+                    "include_power_off": _boolean("Include power-off impedance checks."),
+                }
+            ),
+        },
+        "list_nets": {
+            "description": "List nets with optional domain/risk filters.",
+            "inputSchema": _schema(
+                {
+                    "domain": _nullable_enum(
+                        "Optional net domain filter.",
+                        ["power", "ground", "analog", "digital", "rf", "mixed", "unknown"],
+                    ),
+                    "risk_level": _nullable_enum("Optional risk filter.", ["low", "medium", "high"]),
+                }
+            ),
+        },
+        "trace_net_neighbors": {
+            "description": "Trace component, rail and test point neighbors for a net.",
+            "inputSchema": _schema({**net_arg, "depth": _integer("Neighbor traversal depth.", minimum=1, maximum=4)}, ["net"]),
+        },
+        "find_test_points": {
+            "description": "Find test points by net, measurement kind or risk level.",
+            "inputSchema": _schema(
+                {
+                    "net": _nullable_string("Optional net name or alias."),
+                    "measurement": _nullable_enum(
+                        "Optional measurement kind.",
+                        ["dc_voltage", "current", "waveform", "logic", "impedance", "thermal"],
+                    ),
+                    "risk_level": _nullable_enum("Optional risk filter.", ["low", "medium", "high"]),
+                }
+            ),
+        },
+        "trace_power_path": {
+            "description": "Trace upstream rails feeding a target net.",
+            "inputSchema": _schema(net_arg, ["net"]),
+        },
+        "list_downstream_loads": {
+            "description": "List nearby downstream load components for a rail or net.",
+            "inputSchema": _schema(
+                {
+                    "rail": _nullable_string("Optional rail name."),
+                    "net": _nullable_string("Optional starting net name or alias."),
+                    "depth": _integer("Traversal depth.", minimum=1, maximum=6),
+                }
+            ),
+        },
+        "set_power_rail": {
+            "description": "Safety-check and mock a programmable PSU rail action.",
+            "inputSchema": _schema(
+                {
+                    "rail": _string("Rail name from board_context.rails."),
+                    "voltage_V": _number("Requested voltage in volts.", minimum=0),
+                    "current_limit_A": _number("Requested current limit in amps.", minimum=0),
+                    "output": _boolean("Enable or disable output."),
+                    **dry_run_arg,
+                    **confirm_arg,
+                },
+                ["rail", "voltage_V", "current_limit_A"],
+            ),
+        },
+        "measure_dc_voltage": {
+            "description": "Measure DC voltage on a net with the configured DMM.",
+            "inputSchema": _schema({**net_arg, **test_point_arg, **confirm_arg}, ["net"]),
+        },
+        "measure_impedance": {
+            "description": "Measure power-off impedance on a net with the configured DMM.",
+            "inputSchema": _schema(
+                {
+                    **net_arg,
+                    **test_point_arg,
+                    "power_state": _enum("Must be off for impedance measurements.", ["off"]),
+                    **confirm_arg,
+                },
+                ["net"],
+            ),
+        },
+        "capture_waveform": {
+            "description": "Capture a synthetic mock waveform and write a CSV artifact.",
+            "inputSchema": _schema({**net_arg, **test_point_arg, **sample_args, **confirm_arg}, ["net"]),
+        },
+        "capture_logic": {
+            "description": "Capture a digital logic trace and write a CSV artifact.",
+            "inputSchema": _schema({**net_arg, **test_point_arg, **sample_args, **confirm_arg}, ["net"]),
+        },
+        "capture_scope_screenshot": {
+            "description": "Capture a scope screenshot artifact for a net.",
+            "inputSchema": _schema(
+                {**net_arg, "artifact_id": _nullable_string("Optional source waveform artifact id."), **confirm_arg},
+                ["net"],
+            ),
+        },
+        "extract_signal_features": {
+            "description": "Extract basic voltage features from a waveform CSV.",
+            "inputSchema": _schema(
+                {
+                    "artifact_id": _nullable_string("Known session artifact id."),
+                    "uri": _nullable_string("Direct waveform CSV path."),
+                }
+            ),
+        },
+        "diagnose_hardware": {"description": "Run rule-based diagnosis over current session measurements.", "inputSchema": empty},
+        "suggest_next_probe": {
+            "description": "Suggest low-risk next measurements.",
+            "inputSchema": _schema({"net": _nullable_string("Optional focus net name or alias.")}),
+        },
+        "esp32_set_mux": {
+            "description": "Mock the ESP32 fixture MUX tool.",
+            "inputSchema": _schema(
+                {"channel": _integer("MUX channel.", minimum=0, maximum=31), **dry_run_arg, **confirm_arg},
+                ["channel"],
+            ),
+        },
+        "esp32_reset_dut": {
+            "description": "Mock the ESP32 fixture DUT reset tool.",
+            "inputSchema": _schema(
+                {"pulse_ms": _integer("Reset pulse width in milliseconds.", minimum=10, maximum=5000), **dry_run_arg, **confirm_arg}
+            ),
+        },
+    }
+
+
+def _validate_tool_arguments(name: str, arguments: dict[str, Any]) -> None:
+    schema = _tool_definitions()[name]["inputSchema"]
+    _validate_object_schema(name, arguments, schema)
+
+
+def _validate_object_schema(label: str, arguments: dict[str, Any], schema: dict[str, Any]) -> None:
+    properties = schema.get("properties", {})
+    for field in schema.get("required", []):
+        if field not in arguments:
+            raise ValueError(f"{label}.{field} is required")
+    if schema.get("additionalProperties") is False:
+        for field in arguments:
+            if field not in properties:
+                raise ValueError(f"{label}.{field} is not a supported argument")
+    for field, value in arguments.items():
+        if field not in properties:
+            continue
+        _validate_schema_value(f"{label}.{field}", value, properties[field])
+
+
+def _validate_schema_value(label: str, value: Any, schema: dict[str, Any]) -> None:
+    expected = schema.get("type")
+    allowed_types = expected if isinstance(expected, list) else [expected]
+    if value is None:
+        if "null" not in allowed_types:
+            raise ValueError(f"{label} must not be null")
+        return
+    if "string" in allowed_types and isinstance(value, str):
+        pass
+    elif "boolean" in allowed_types and isinstance(value, bool):
+        pass
+    elif "integer" in allowed_types and isinstance(value, int) and not isinstance(value, bool):
+        pass
+    elif "number" in allowed_types and isinstance(value, (int, float)) and not isinstance(value, bool):
+        pass
+    else:
+        raise ValueError(f"{label} must be {expected}")
+    enum_values = schema.get("enum")
+    if enum_values is not None and value not in enum_values:
+        raise ValueError(f"{label} must be one of {enum_values}")
+    minimum = schema.get("minimum")
+    if minimum is not None and isinstance(value, (int, float)) and not isinstance(value, bool) and value < minimum:
+        raise ValueError(f"{label} must be >= {minimum}")
+    maximum = schema.get("maximum")
+    if maximum is not None and isinstance(value, (int, float)) and not isinstance(value, bool) and value > maximum:
+        raise ValueError(f"{label} must be <= {maximum}")
+
+
+def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
+    return {"type": "object", "properties": properties, "required": required or [], "additionalProperties": False}
+
+
+def _string(description: str) -> dict[str, Any]:
+    return {"type": "string", "description": description}
+
+
+def _nullable_string(description: str) -> dict[str, Any]:
+    return {"type": ["string", "null"], "description": description}
+
+
+def _boolean(description: str) -> dict[str, Any]:
+    return {"type": "boolean", "description": description}
+
+
+def _integer(description: str, minimum: int | None = None, maximum: int | None = None) -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "integer", "description": description}
+    if minimum is not None:
+        schema["minimum"] = minimum
+    if maximum is not None:
+        schema["maximum"] = maximum
+    return schema
+
+
+def _nullable_integer(description: str, minimum: int | None = None, maximum: int | None = None) -> dict[str, Any]:
+    schema = _integer(description, minimum=minimum, maximum=maximum)
+    schema["type"] = ["integer", "null"]
+    return schema
+
+
+def _number(description: str, minimum: float | None = None) -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "number", "description": description}
+    if minimum is not None:
+        schema["minimum"] = minimum
+    return schema
+
+
+def _enum(description: str, values: list[str]) -> dict[str, Any]:
+    return {"type": "string", "description": description, "enum": values}
+
+
+def _nullable_enum(description: str, values: list[str]) -> dict[str, Any]:
+    return {"type": ["string", "null"], "description": description, "enum": values + [None]}
 
 
 def _timestamp_id() -> str:
